@@ -401,7 +401,7 @@ class Hunyuan3DPaintPreprocessStage(PipelineStage):
         self._renderer = MeshRender(
             default_resolution=self.config.paint_render_size,
             texture_size=self.config.paint_texture_size,
-            device=self.device
+            device=self.device,
         )
         self._renderer_loaded = True
         logger.info("Mesh renderer initialized")
