@@ -30,8 +30,7 @@ def _load_custom_rasterizer():
         name="custom_rasterizer_kernel",
         sources=[
             f"{_abs_path}/rasterizer.cpp",
-            f"{_abs_path}/rasterizer_gpu.cu",
-        ],
+        ] + ([f"{_abs_path}/rasterizer_gpu.cu"] if torch.cuda.is_available() else []),
         extra_cflags=["-O3"],
         extra_cuda_cflags=["-O3", "--use_fast_math"],
         verbose=False,
@@ -49,16 +48,24 @@ def rasterize(
     """Rasterize mesh to get face indices and barycentric coordinates."""
     kernel = _load_custom_rasterizer()
 
+    real_device = pos.device
+    device = "cpu" if real_device.type != "cuda" else real_device
+
     if clamp_depth is None:
-        clamp_depth = torch.zeros(0, device=pos.device)
+        clamp_depth = torch.zeros(0, device=device)
 
     # pos should be [N, 4], remove batch dim if present
     if pos.dim() == 3:
         pos = pos[0]
 
     findices, barycentric = kernel.rasterize_image(
-        pos, tri, clamp_depth, resolution[1], resolution[0], 1e-6, use_depth_prior
+        pos.to(device), tri.to(device), clamp_depth.to(device), resolution[1], resolution[0], 1e-6, use_depth_prior
     )
+
+    if real_device.type != "cuda":
+        findices = findices.to(real_device)
+        barycentric = barycentric.to(real_device)
+
     return findices, barycentric
 
 
