@@ -9,11 +9,11 @@
 #include <vector>
 #include <ATen/ATen.h>
 
-#ifndef __CUDACC__
+#ifdef CUDA_ENABLED
+#include <ATen/cuda/CUDAContext.h>
+#else
 #define __host__
 #define __device__
-#else
-#include <ATen/cuda/CUDAContext.h>
 #endif
 
 #define INT64 unsigned long long

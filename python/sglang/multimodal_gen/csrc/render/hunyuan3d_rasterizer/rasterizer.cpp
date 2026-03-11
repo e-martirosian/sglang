@@ -128,12 +128,8 @@ std::vector<torch::Tensor> rasterize_image_cpu(torch::Tensor V, torch::Tensor F,
 std::vector<torch::Tensor> rasterize_image(torch::Tensor V, torch::Tensor F, torch::Tensor D,
     int width, int height, float occlusion_truncation, int use_depth_prior)
 {
-    int device_id = V.get_device();
-#ifdef __CUDACC__
-    if (device_id == -1)
-        return rasterize_image_cpu(V, F, D, width, height, occlusion_truncation, use_depth_prior);
-    else
-        return rasterize_image_gpu(V, F, D, width, height, occlusion_truncation, use_depth_prior);
+#ifdef CUDA_ENABLED
+    return rasterize_image_gpu(V, F, D, width, height, occlusion_truncation, use_depth_prior);
 #else
     return rasterize_image_cpu(V, F, D, width, height, occlusion_truncation, use_depth_prior);
 #endif

@@ -17,7 +17,9 @@ _abs_path = os.path.dirname(os.path.abspath(__file__))
 _custom_rasterizer_kernel = None
 
 
-def _load_custom_rasterizer():
+def _load_custom_rasterizer(
+    is_cuda: bool = True,
+):
     """JIT compile and load the custom rasterizer kernel."""
     global _custom_rasterizer_kernel
 
@@ -26,13 +28,15 @@ def _load_custom_rasterizer():
 
     from torch.utils.cpp_extension import load
 
+    cuda_enabled_flag = ["-DCUDA_ENABLED"] if is_cuda else []
+    
     _custom_rasterizer_kernel = load(
         name="custom_rasterizer_kernel",
         sources=[
             f"{_abs_path}/rasterizer.cpp",
-        ] + ([f"{_abs_path}/rasterizer_gpu.cu"] if torch.cuda.is_available() else []),
-        extra_cflags=["-O3"],
-        extra_cuda_cflags=["-O3", "--use_fast_math"],
+        ] + ([f"{_abs_path}/rasterizer_gpu.cu"] if is_cuda else []),
+        extra_cflags=["-O3"] + cuda_enabled_flag,
+        extra_cuda_cflags=["-O3", "--use_fast_math"] + cuda_enabled_flag,
         verbose=False,
     )
     return _custom_rasterizer_kernel
@@ -44,15 +48,13 @@ def rasterize(
     resolution: Tuple[int, int],
     clamp_depth: torch.Tensor = None,
     use_depth_prior: int = 0,
+    device: str = "cuda",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Rasterize mesh to get face indices and barycentric coordinates."""
-    kernel = _load_custom_rasterizer()
-
-    real_device = pos.device
-    device = "cpu" if real_device.type != "cuda" else real_device
+    kernel = _load_custom_rasterizer(device == "cuda")
 
     if clamp_depth is None:
-        clamp_depth = torch.zeros(0, device=device)
+        clamp_depth = torch.zeros(0, device=pos.device)
 
     # pos should be [N, 4], remove batch dim if present
     if pos.dim() == 3:
@@ -62,9 +64,9 @@ def rasterize(
         pos.to(device), tri.to(device), clamp_depth.to(device), resolution[1], resolution[0], 1e-6, use_depth_prior
     )
 
-    if real_device.type != "cuda":
-        findices = findices.to(real_device)
-        barycentric = barycentric.to(real_device)
+    if device != pos.device:
+        findices = findices.to(pos.device)
+        barycentric = barycentric.to(pos.device)
 
     return findices, barycentric
 
