@@ -402,6 +402,7 @@ class Hunyuan3DPaintPreprocessStage(PipelineStage):
             default_resolution=self.config.paint_render_size,
             texture_size=self.config.paint_texture_size,
             device=self.device,
+            rasterization_device="cpu" if self.rasterization_on_cpu else self.device,
         )
         self._renderer_loaded = True
         logger.info("Mesh renderer initialized")
