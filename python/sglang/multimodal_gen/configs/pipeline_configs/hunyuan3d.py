@@ -63,9 +63,6 @@ class Hunyuan3D2PipelineConfig(PipelineConfig):
     paint_save_glb: bool = True
     paint_turbo_mode: bool = False
 
-    # Execute rasterization on cpu
-    rasterization_on_cpu: bool = False
-
     def __post_init__(self):
         self.vae_config.load_encoder = False
         self.vae_config.load_decoder = True

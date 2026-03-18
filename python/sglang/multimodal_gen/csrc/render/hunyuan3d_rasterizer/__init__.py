@@ -48,9 +48,9 @@ def rasterize(
     resolution: Tuple[int, int],
     clamp_depth: torch.Tensor = None,
     use_depth_prior: int = 0,
-    device: str = "cuda",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Rasterize mesh to get face indices and barycentric coordinates."""
+    device = "cpu" if pos.device.type == "npu" else pos.device.type
     kernel = _load_custom_rasterizer(device == "cuda")
 
     if clamp_depth is None:
@@ -64,9 +64,8 @@ def rasterize(
         pos.to(device), tri.to(device), clamp_depth.to(device), resolution[1], resolution[0], 1e-6, use_depth_prior
     )
 
-    if device != pos.device:
-        findices = findices.to(pos.device)
-        barycentric = barycentric.to(pos.device)
+    findices = findices.to(pos.device)
+    barycentric = barycentric.to(pos.device)
 
     return findices, barycentric
 

@@ -297,11 +297,9 @@ class MeshRender:
         texture_size: int = 1024,
         bake_mode: str = "linear",
         device: str = "cuda",
-        rasterization_device: str = "cuda",
     ):
         """Initialize the mesh renderer."""
         self.device = device
-        self.rasterization_device = rasterization_device
 
         self.set_default_render_resolution(default_resolution)
         self.set_default_texture_resolution(texture_size)
@@ -370,9 +368,7 @@ class MeshRender:
         if pos_clip.dim() == 2:
             pos_clip = pos_clip.unsqueeze(0)
 
-        findices, barycentric = rasterize(
-            pos_clip, tri, resolution, device=self.rasterization_device
-        )
+        findices, barycentric = rasterize(pos_clip, tri, resolution)
         rast_out = torch.cat((barycentric, findices.unsqueeze(-1).float()), dim=-1)
         rast_out = rast_out.unsqueeze(0)
         return rast_out

@@ -226,9 +226,6 @@ class PipelineConfig:
     # Wan2.2 TI2V parameters
     boundary_ratio: float | None = None
 
-    # Execute rasterization on cpu (Hunyuan3D)
-    rasterization_on_cpu: bool = False
-
     # Compilation
     # enable_torch_compile: bool = False
 
@@ -531,14 +528,6 @@ class PipelineConfig:
         from sglang.multimodal_gen.configs.models.encoders.t5 import T5Config
 
         T5Config.add_cli_args(parser, prefix=f"{prefix_with_dot}t5-config")
-
-        # Execute rasterization on cpu (Hunyuan3D)
-        parser.add_argument(
-            f"--{prefix_with_dot}rasterization-on-cpu",
-            action=StoreBoolean,
-            default=PipelineConfig.rasterization_on_cpu,
-            help="Execute rasterization on cpu (Hunyuan3D)",
-        )
 
         return parser
 
