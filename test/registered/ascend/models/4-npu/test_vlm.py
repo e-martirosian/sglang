@@ -8,18 +8,18 @@ from sglang.test.ci.ci_register import register_npu_ci
 register_npu_ci(est_time=400, suite="nightly-4-npu-a3", nightly=True)
 
 COMMON_SERVER_ARGS = [
-            "--tp-size",
-            "4",
-            "--trust-remote-code",
-            "--cuda-graph-max-bs",
-            "32",
-            "--enable-multimodal",
-            "--log-level",
-            "info",
-            "--attention-backend",
-            "ascend",
-            "--disable-cuda-graph",
-        ]
+    "--tp-size",
+    "4",
+    "--trust-remote-code",
+    "--cuda-graph-max-bs",
+    "32",
+    "--enable-multimodal",
+    "--log-level",
+    "info",
+    "--attention-backend",
+    "ascend",
+    "--disable-cuda-graph",
+]
 
 COMMON_MODEL_ARGS = {
     "tp": 4,
@@ -44,8 +44,9 @@ class TestVLMModels(TestLMModels):
     models = MODELS
 
     def test_vlm_mmmu_benchmakr(self):
-        for model in self.model_names:
+        for model in self.models:
             self._run_vlm_mmmu_test(model, "./logs")
+
 
 if __name__ == "__main__":
     unittest.main()
