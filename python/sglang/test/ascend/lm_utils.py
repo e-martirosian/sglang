@@ -14,6 +14,8 @@ from sglang.test.test_utils import (
 
 
 class TestLMModels(CustomTestCase):
+    __unittest_skip__ = True
+    __unittest_skip_why__ = "Base class for inheritance"
 
     @classmethod
     def setUpClass(cls):
@@ -28,7 +30,6 @@ class TestLMModels(CustomTestCase):
 
     def run_eval(
         self,
-        model,
         output_path: str,
         limit: str,
         *,
@@ -45,7 +46,7 @@ class TestLMModels(CustomTestCase):
         os.makedirs(output_path, exist_ok=True)
 
         # -------- compose --model_args --------
-        model_args = f'model_version="{model.model_name}",' f"tp={model.tp}"
+        model_args = f'model_version="{self.model}",' f"tp={self.tp}"
 
         # -------- build command list --------
         cmd = [
@@ -59,17 +60,17 @@ class TestLMModels(CustomTestCase):
             "--tasks",
             tasks,
             "--batch_size",
-            str(model.client.batch_size),
+            self.batch_size,
             "--log_samples",
             "--log_samples_suffix",
             model_llms_eval,
             "--output_path",
-            str(output_path),
+            output_path,
             "--limit",
             limit,
             # "--config",
             # "/__w/sglang/sglang/test/registered/ascend/vlm_models/mmmu-val.yaml",
-        ] + model.llms_eval_args
+        ] + self.llms_eval_args
 
         subprocess.run(
             cmd,
@@ -79,7 +80,6 @@ class TestLMModels(CustomTestCase):
 
     def run_perf(
         self,
-        model,
         output_file: str,
         *,
         env: dict | None = None,
@@ -90,16 +90,16 @@ class TestLMModels(CustomTestCase):
             "-m",
             "sglang.bench_serving",
             "--model",
-            model.model_name,
+            self.model,
             "--output-file",
             output_file,
             "--dataset-name",
-            model.dataset,
+            self.dataset,
             "--host",
             self.base_url.split("//")[-1].split(":")[0],
             "--port",
             self.base_url.split(":")[-1],
-        ] + model.bench_serving_args
+        ] + self.bench_serving_args
 
         subprocess.run(
             cmd,
@@ -109,7 +109,6 @@ class TestLMModels(CustomTestCase):
 
     def _run_vlm_mmmu_test(
         self,
-        model,
         output_path="./logs",
         test_name="",
         custom_env=None,
@@ -125,7 +124,7 @@ class TestLMModels(CustomTestCase):
             custom_env: Optional custom environment variables
             capture_output: Whether to capture server stdout/stderr
         """
-        print(f"\nTesting model: {model.model_name}{test_name}")
+        print(f"\nTesting model: {self.model}{test_name}")
 
         process = None
         server_output = ""
@@ -144,11 +143,11 @@ class TestLMModels(CustomTestCase):
                 stderr_file = open("/tmp/server_stderr.log", "w")
 
             process = popen_launch_server(
-                model.model_name,
+                self.model,
                 base_url=self.base_url,
                 timeout=self.time_out,
                 api_key=self.api_key,
-                other_args=model.server_args,
+                other_args=self.server_args,
                 env=process_env,
                 return_stdout_stderr=(
                     (stdout_file, stderr_file) if capture_output else None
@@ -156,7 +155,7 @@ class TestLMModels(CustomTestCase):
             )
 
             # Run evaluation
-            self.run_eval(model, output_path, limit)
+            self.run_eval(output_path, limit)
 
             # Get the result file
             result_file_path = glob.glob(f"{output_path}/*.json")[0]
@@ -168,7 +167,7 @@ class TestLMModels(CustomTestCase):
             # Process the result
             mmmu_accuracy = result["results"]["mmmu_val"]["mmmu_acc,none"]
             print(
-                f"Model {model.model_name} achieved accuracy{test_name}: {mmmu_accuracy:.4f}"
+                f"Model {self.model} achieved accuracy{test_name}: {mmmu_accuracy:.4f}"
             )
 
             # Capture server output if requested
@@ -178,12 +177,12 @@ class TestLMModels(CustomTestCase):
             # Assert performance meets expected threshold
             self.assertGreaterEqual(
                 mmmu_accuracy,
-                model.accuracy,
-                f"Model {model.model_name} accuracy ({mmmu_accuracy:.4f}) below expected threshold ({model.accuracy:.4f}){test_name}",
+                self.accuracy,
+                f"Model {self.model} accuracy ({mmmu_accuracy:.4f}) below expected threshold ({self.accuracy:.4f}){test_name}",
             )
 
             os.makedirs(f"{output_path}/perf/")
-            self.run_perf(model, f"{output_path}/perf/perf_res_{time.time()}.json")
+            self.run_perf(f"{output_path}/perf/perf_res_{time.time()}.json")
 
             result_file_path = glob.glob(f"{output_path}/perf/*.json")[0]
             with open(result_file_path, "r") as f:
@@ -191,20 +190,22 @@ class TestLMModels(CustomTestCase):
                 print(f"Performance Result{test_name}\n: {result}")
 
             out_throughput = result["output_throughput"]
-            print(f"Model {model.model_name} achieved accuracy{test_name}: {out_throughput:.4f}")
+            print(
+                f"Model {self.model} achieved accuracy{test_name}: {out_throughput:.4f}"
+            )
 
             # Assert performance meets expected threshold
             self.assertLessEqual(
                 out_throughput,
-                model.out_throughput,
-                f"Model {model.model_name} perf ({out_throughput:.4f}) below expected threshold ({model.out_throughput:.4f}){test_name}",
+                self.out_throughput,
+                f"Model {self.model} perf ({out_throughput:.4f}) below expected threshold ({self.out_throughput:.4f}){test_name}",
             )
 
             return server_output
 
         except Exception as e:
-            print(f"Error testing {model.model_name}{test_name}: {e}")
-            self.fail(f"Test failed for {model.model_name}{test_name}: {e}")
+            print(f"Error testing {self.model}{test_name}: {e}")
+            self.fail(f"Test failed for {self.model}{test_name}: {e}")
 
         finally:
             # Ensure process cleanup happens regardless of success/failure
@@ -245,3 +246,6 @@ class TestLMModels(CustomTestCase):
                 print(f"Error reading {tag.lower()} file: {e}")
 
         return "\n".join(output_lines)
+
+    def test_vlm_mmmu_benchmark(self):
+        self._run_vlm_mmmu_test()
