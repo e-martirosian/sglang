@@ -8,14 +8,13 @@ from sglang.srt.utils import kill_process_tree
 from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
-    CustomTestCase,
     popen_launch_server,
 )
 
 
-class TestLMModels(CustomTestCase):
-    __unittest_skip__ = True
-    __unittest_skip_why__ = "Base class for inheritance"
+class TestLMModels:
+    server_args = []
+    llms_eval_args = []
 
     @classmethod
     def setUpClass(cls):
@@ -42,7 +41,6 @@ class TestLMModels(CustomTestCase):
         """
         # -------- fixed settings --------
         model_llms_eval = "openai_compatible"
-        tasks = "mmmu_val"
         os.makedirs(output_path, exist_ok=True)
 
         # -------- compose --model_args --------
@@ -58,7 +56,7 @@ class TestLMModels(CustomTestCase):
             "--model_args",
             model_args,
             "--tasks",
-            tasks,
+            self.task,
             "--batch_size",
             self.batch_size,
             "--log_samples",
@@ -68,8 +66,6 @@ class TestLMModels(CustomTestCase):
             output_path,
             "--limit",
             limit,
-            # "--config",
-            # "/__w/sglang/sglang/test/registered/ascend/vlm_models/mmmu-val.yaml",
         ] + self.llms_eval_args
 
         subprocess.run(
@@ -165,7 +161,7 @@ class TestLMModels(CustomTestCase):
                 print(f"Eval Result{test_name}\n: {result}")
 
             # Process the result
-            mmmu_accuracy = result["results"]["mmmu_val"]["mmmu_acc,none"]
+            mmmu_accuracy = result["results"][self.task][self.llms_eval_acc_tag]
             print(
                 f"Model {self.model} achieved accuracy{test_name}: {mmmu_accuracy:.4f}"
             )

@@ -24,32 +24,28 @@ from sglang.test.ascend.test_ascend_utils import (
     STABLELM_2_1_6B_WEIGHTS_PATH,
 )
 from sglang.test.ci.ci_register import register_npu_ci
+from sglang.test.test_utils import CustomTestCase
 
 register_npu_ci(est_time=400, suite="nightly-1-npu-a3", nightly=True)
 
 
 class Test1NPUMMMU(TestLMModels):
-    __unittest_skip__ = True
-    __unittest_skip_why__ = "Base class for inheritance"
-
     dataset = "mmmu"
     task = "mmmu_val"
     batch_size = 32
     tp = 1
+    llms_eval_acc_tag = "mmmu_acc,none"
 
 
 class Test1NPUGSM8K(TestLMModels):
-    __unittest_skip__ = True
-    __unittest_skip_why__ = "Base class for inheritance"
-
     dataset = "gsm8k"
     task = "gsm8k_val"
     batch_size = 32
     tp = 1
-    llms_eval_args = ["--num-fewshots", "5"]
+    llms_eval_args = ["--num-fewshot", "5"]
 
 
-class TestLlama3211BVisionInstruct(Test1NPUMMMU):
+class TestLlama3211BVisionInstruct(Test1NPUMMMU, CustomTestCase):
     model = (
         "/root/.cache/modelscope/hub/models/LLM-Research/Llama-3.2-11B-Vision-Instruct"
     )
@@ -65,12 +61,12 @@ class TestLlama3211BVisionInstruct(Test1NPUMMMU):
     ]
 
 
-class TestAFM(Test1NPUGSM8K):
+class TestAFM(Test1NPUGSM8K, CustomTestCase):
     model = AFM_4_5B_BASE_WEIGHTS_PATH
     accuracy = 0.375
 
 
-class TestBaichuan(Test1NPUGSM8K):
+class TestBaichuan(Test1NPUGSM8K, CustomTestCase):
     model = BAICHUAN2_13B_CHAT_WEIGHTS_PATH
     accuracy = 0.48
     server_args = [
@@ -89,7 +85,7 @@ class TestBaichuan(Test1NPUGSM8K):
     llms_eval_args = ["--num-fewshots", "1"]
 
 
-class TestChatGlm2(Test1NPUGSM8K):
+class TestChatGlm2(Test1NPUGSM8K, CustomTestCase):
     model = CHATGLM2_6B_WEIGHTS_PATH
     accuracy = 0.25
     server_args = [
@@ -104,7 +100,7 @@ class TestChatGlm2(Test1NPUGSM8K):
     ]
 
 
-class TestEXAONE(Test1NPUGSM8K):
+class TestEXAONE(Test1NPUGSM8K, CustomTestCase):
     model = EXAONE_3_5_7_8B_INSTRUCT_WEIGHTS_PATH
     # Allow 1% tolerance for the accuracy threshold
     accuracy = round(0.8 * 0.99, 3)
@@ -120,7 +116,7 @@ class TestEXAONE(Test1NPUGSM8K):
     ]
 
 
-class TestGemma34B(Test1NPUGSM8K):
+class TestGemma34B(Test1NPUGSM8K, CustomTestCase):
     model = GEMMA_3_4B_IT_WEIGHTS_PATH
     accuracy = 0.7
     server_args = [
@@ -136,38 +132,38 @@ class TestGemma34B(Test1NPUGSM8K):
     ]
 
 
-class TestGLM49BChat(Test1NPUGSM8K):
+class TestGLM49BChat(Test1NPUGSM8K, CustomTestCase):
     model = GLM_4_9B_CHAT_WEIGHTS_PATH
     accuracy = 0.77
 
 
-class TestGranite(Test1NPUGSM8K):
+class TestGranite(Test1NPUGSM8K, CustomTestCase):
     model = GRANITE_3_0_3B_A800M_INSTRUCT_WEIGHTS_PATH
     accuracy = 0.38
 
 
-class TestGranite(Test1NPUGSM8K):
+class TestGranite(Test1NPUGSM8K, CustomTestCase):
     model = GRANITE_3_1_8B_INSTRUCT_WEIGHTS_PATH
     accuracy = 0.695
 
 
-class TestInternlm2(Test1NPUGSM8K):
+class TestInternlm2(Test1NPUGSM8K, CustomTestCase):
     os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
     model = INTERNLM2_7B_WEIGHTS_PATH
     accuracy = 0.585
 
 
-class TestLlama(Test1NPUGSM8K):
+class TestLlama(Test1NPUGSM8K, CustomTestCase):
     model = LLAMA_2_7B_WEIGHTS_PATH
     accuracy = 0.18
 
 
-class TestMiMo7BRL(Test1NPUGSM8K):
+class TestMiMo7BRL(Test1NPUGSM8K, CustomTestCase):
     model = MIMO_7B_RL_WEIGHTS_PATH
     accuracy = 0.75
 
 
-class TestMiniCPM3(Test1NPUGSM8K):
+class TestMiniCPM3(Test1NPUGSM8K, CustomTestCase):
     model = MINICPM3_4B_WEIGHTS_PATH
     accuracy = 0.69
     server_args = [
@@ -186,23 +182,23 @@ class TestMiniCPM3(Test1NPUGSM8K):
     ]
 
 
-class TestMistral7B(Test1NPUGSM8K):
+class TestMistral7B(Test1NPUGSM8K, CustomTestCase):
     model = MISTRAL_7B_INSTRUCT_V0_2_WEIGHTS_PATH
     accuracy = 0.375
 
 
-class TestPersimmon8BChat(Test1NPUGSM8K):
+class TestPersimmon8BChat(Test1NPUGSM8K, CustomTestCase):
     os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
     model = PERSIMMON_8B_CHAT_WEIGHTS_PATH
     accuracy = 0.17
 
 
-class TestPhi4(Test1NPUGSM8K):
+class TestPhi4(Test1NPUGSM8K, CustomTestCase):
     model = PHI_4_MULTIMODAL_INSTRUCT_WEIGHTS_PATH
     accuracy = 0.8
 
 
-class TestQwen306B(Test1NPUGSM8K):
+class TestQwen306B(Test1NPUGSM8K, CustomTestCase):
     model = QWEN3_0_6B_WEIGHTS_PATH
     accuracy = 0.38
     server_args = [
@@ -214,7 +210,7 @@ class TestQwen306B(Test1NPUGSM8K):
     ]
 
 
-class TestQwen317BGPTQInt8(Test1NPUGSM8K):
+class TestQwen317BGPTQInt8(Test1NPUGSM8K, CustomTestCase):
     model = QWEN3_1_7B_GPTQ_INT8_WEIGHTS_PATH
     accuracy = 0.65
     server_args = [
@@ -228,7 +224,7 @@ class TestQwen317BGPTQInt8(Test1NPUGSM8K):
     ]
 
 
-class TestSmolLM(Test1NPUGSM8K):
+class TestSmolLM(Test1NPUGSM8K, CustomTestCase):
     model = SMOLLM_1_7B_WEIGHTS_PATH
     accuracy = 0.05
     server_args = [
@@ -243,7 +239,7 @@ class TestSmolLM(Test1NPUGSM8K):
     ]
 
 
-class TestStablelm(Test1NPUGSM8K):
+class TestStablelm(Test1NPUGSM8K, CustomTestCase):
     model = STABLELM_2_1_6B_WEIGHTS_PATH
     accuracy = 0.195
     server_args = [
