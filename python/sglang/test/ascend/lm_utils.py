@@ -2,49 +2,33 @@ import glob
 import json
 import os
 import subprocess
+import time
 
 from sglang.srt.utils import kill_process_tree
 from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
-    CustomTestCase,
     popen_launch_server,
 )
 
 
-class TestVLMModels(CustomTestCase):
-    model = ""
-    mmmu_accuracy = 0.00
-    other_args = [
-        "--trust-remote-code",
-        "--cuda-graph-max-bs",
-        "32",
-        "--enable-multimodal",
-        "--mem-fraction-static",
-        0.35,
-        "--log-level",
-        "info",
-        "--attention-backend",
-        "ascend",
-        "--disable-cuda-graph",
-        "--tp-size",
-        4,
-    ]
-    timeout_for_server_launch = DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH
+class TestLMModels:
+    server_args = []
+    llms_eval_args = []
 
     @classmethod
     def setUpClass(cls):
         # Removed argument parsing from here
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.api_key = "sk-123456"
+        cls.time_out = DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH
 
         # Set OpenAI API key and base URL environment variables. Needed for lmm-evals to work.
         os.environ["OPENAI_API_KEY"] = cls.api_key
         os.environ["OPENAI_API_BASE"] = f"{cls.base_url}/v1"
 
-    def run_mmmu_eval(
+    def run_eval(
         self,
-        model_version: str,
         output_path: str,
         limit: str,
         *,
@@ -56,15 +40,11 @@ class TestVLMModels(CustomTestCase):
         We are focusing only on the validation set due to resource constraints.
         """
         # -------- fixed settings --------
-        model = "openai_compatible"
-        tp = 1
-        tasks = "mmmu_val"
-        batch_size = 2
-        log_suffix = "openai_compatible"
+        model_llms_eval = "openai_compatible"
         os.makedirs(output_path, exist_ok=True)
 
         # -------- compose --model_args --------
-        model_args = f'model_version="{model_version}",' f"tp={tp}"
+        model_args = f'model_version="{self.model}",' f"tp={self.tp}"
 
         # -------- build command list --------
         cmd = [
@@ -72,23 +52,50 @@ class TestVLMModels(CustomTestCase):
             "-m",
             "lmms_eval",
             "--model",
-            model,
+            model_llms_eval,
             "--model_args",
             model_args,
             "--tasks",
-            tasks,
+            self.task,
             "--batch_size",
-            str(batch_size),
+            self.batch_size,
             "--log_samples",
             "--log_samples_suffix",
-            log_suffix,
+            model_llms_eval,
             "--output_path",
-            str(output_path),
+            output_path,
             "--limit",
             limit,
-            "--config",
-            "/__w/sglang/sglang/test/registered/ascend/vlm_models/mmmu-val.yaml",
-        ]
+        ] + self.llms_eval_args
+
+        subprocess.run(
+            cmd,
+            check=True,
+            timeout=3600,
+        )
+
+    def run_perf(
+        self,
+        output_file: str,
+        *,
+        env: dict | None = None,
+    ):
+        # -------- build command list --------
+        cmd = [
+            "python3",
+            "-m",
+            "sglang.bench_serving",
+            "--model",
+            self.model,
+            "--output-file",
+            output_file,
+            "--dataset-name",
+            self.dataset,
+            "--host",
+            self.base_url.split("//")[-1].split(":")[0],
+            "--port",
+            self.base_url.split(":")[-1],
+        ] + self.bench_serving_args
 
         subprocess.run(
             cmd,
@@ -134,9 +141,9 @@ class TestVLMModels(CustomTestCase):
             process = popen_launch_server(
                 self.model,
                 base_url=self.base_url,
-                timeout=self.timeout_for_server_launch,
+                timeout=self.time_out,
                 api_key=self.api_key,
-                other_args=self.other_args,
+                other_args=self.server_args,
                 env=process_env,
                 return_stdout_stderr=(
                     (stdout_file, stderr_file) if capture_output else None
@@ -144,17 +151,17 @@ class TestVLMModels(CustomTestCase):
             )
 
             # Run evaluation
-            self.run_mmmu_eval(self.model, output_path, limit)
+            self.run_eval(output_path, limit)
 
             # Get the result file
             result_file_path = glob.glob(f"{output_path}/*.json")[0]
 
             with open(result_file_path, "r") as f:
                 result = json.load(f)
-                print(f"Result{test_name}\n: {result}")
+                print(f"Eval Result{test_name}\n: {result}")
 
             # Process the result
-            mmmu_accuracy = result["results"]["mmmu_val"]["mmmu_acc,none"]
+            mmmu_accuracy = result["results"][self.task][self.llms_eval_acc_tag]
             print(
                 f"Model {self.model} achieved accuracy{test_name}: {mmmu_accuracy:.4f}"
             )
@@ -166,8 +173,28 @@ class TestVLMModels(CustomTestCase):
             # Assert performance meets expected threshold
             self.assertGreaterEqual(
                 mmmu_accuracy,
-                self.mmmu_accuracy,
-                f"Model {self.model} accuracy ({mmmu_accuracy:.4f}) below expected threshold ({self.mmmu_accuracy:.4f}){test_name}",
+                self.accuracy,
+                f"Model {self.model} accuracy ({mmmu_accuracy:.4f}) below expected threshold ({self.accuracy:.4f}){test_name}",
+            )
+
+            os.makedirs(f"{output_path}/perf/")
+            self.run_perf(f"{output_path}/perf/perf_res_{time.time()}.json")
+
+            result_file_path = glob.glob(f"{output_path}/perf/*.json")[0]
+            with open(result_file_path, "r") as f:
+                result = json.load(f)
+                print(f"Performance Result{test_name}\n: {result}")
+
+            out_throughput = result["output_throughput"]
+            print(
+                f"Model {self.model} achieved accuracy{test_name}: {out_throughput:.4f}"
+            )
+
+            # Assert performance meets expected threshold
+            self.assertLessEqual(
+                out_throughput,
+                self.out_throughput,
+                f"Model {self.model} perf ({out_throughput:.4f}) below expected threshold ({self.out_throughput:.4f}){test_name}",
             )
 
             return server_output
@@ -215,3 +242,6 @@ class TestVLMModels(CustomTestCase):
                 print(f"Error reading {tag.lower()} file: {e}")
 
         return "\n".join(output_lines)
+
+    def test_vlm_mmmu_benchmark(self):
+        self._run_vlm_mmmu_test()
