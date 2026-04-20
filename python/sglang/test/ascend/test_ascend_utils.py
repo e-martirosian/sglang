@@ -24,7 +24,9 @@ from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
     auto_config_device,
+    is_in_ci,
     popen_launch_server,
+    write_github_step_summary,
 )
 
 # Model weights storage directory
@@ -89,6 +91,9 @@ LLAMA_3_2_1B_INSTRUCT_WEIGHTS_PATH = os.path.join(
 LLAMA_3_2_1B_WEIGHTS_PATH = os.path.join(MODEL_WEIGHTS_DIR, "LLM-Research/Llama-3.2-1B")
 LLAMA_4_SCOUT_17B_16E_INSTRUCT_WEIGHTS_PATH = os.path.join(
     MODEL_WEIGHTS_DIR, "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+)
+LLaDA2_0_MINI_WEIGHTS_PATH = os.path.join(
+    MODEL_WEIGHTS_DIR, "inclusionAI/LLaDA2.0-mini"
 )
 META_LLAMA_3_1_8B_INSTRUCT = os.path.join(
     MODEL_WEIGHTS_DIR, "LLM-Research/Meta-Llama-3.1-8B-Instruct"
@@ -549,3 +554,35 @@ def run_bench_serving(
 
     assert res["completed"] == num_prompts
     return res
+
+
+HEADER = """
+### Models
+| Model | Variant | Output Throughput | Expected Output Throughput | Latency | Expected Latency | Accuracy | Threshold | Status |
+| ----- | ------- | -------- | ------------------ | ------- | ---------------- | -------- | --------- | ------ |
+"""
+
+
+def write_results_to_github_step_summary(results: dict):
+    if not is_in_ci():
+        return
+
+    write_github_step_summary_once(HEADER)
+
+    summary = ""
+    for model, metrics in results.items():
+        error = metrics.get("error", "")
+        status = (
+            "✅"
+            if error != "" and metrics["accuracy"] >= metrics["expected_accuracy"]
+            else "❌ " + error
+        )
+        summary += f"| {model} | {metrics['params']} | {metrics['output_throughput']} | {metrics['output_throughput_threshold']} | {metrics['latency']} | {metrics['latency_threshold']} | {metrics['accuracy']:} | {metrics['accuracy_threshold']} | {status} |\n"
+    write_github_step_summary(summary)
+
+
+def write_github_step_summary_once(summary: str):
+    if getattr(write_github_step_summary_once, "has_written", False):
+        return
+    write_github_step_summary_once.has_written = True
+    write_github_step_summary(summary)
