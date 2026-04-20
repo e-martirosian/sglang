@@ -789,7 +789,10 @@ class DeepEPDispatcher(BaseDispatcher):
         hidden_states: torch.Tensor,
         topk_output: TopKOutput,
     ) -> DispatchOutput:
-        allow_ll = hidden_states.shape[0] <= self._low_latency_dispatcher.num_max_dispatch_tokens_per_rank
+        allow_ll = (
+            hidden_states.shape[0]
+            <= envs.SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK.get()
+        )
         self.dispatch_a(hidden_states, topk_output, allow_ll)
         if self._deepep_dispatch_hooks is not None:
             self._deepep_dispatch_hooks(self)
@@ -800,7 +803,7 @@ class DeepEPDispatcher(BaseDispatcher):
         self,
         hidden_states: torch.Tensor,
         topk_output: TopKOutput,
-        allow_ll: bool = False,
+        allow_ll: bool = True,
     ):
         self._update_stage(_Stage.INITIAL, _Stage.AFTER_DISPATCH_A)
         inner_state = self._get_impl(allow_ll).dispatch_a(
@@ -811,7 +814,7 @@ class DeepEPDispatcher(BaseDispatcher):
 
     def dispatch_b(
         self,
-        allow_ll: bool = False,
+        allow_ll: bool = True,
     ):
         self._update_stage(_Stage.AFTER_DISPATCH_A, _Stage.AFTER_DISPATCH_B)
         inner_state = self._dispatch_intermediate_state
@@ -830,7 +833,7 @@ class DeepEPDispatcher(BaseDispatcher):
     def combine_a(
         self,
         combine_input: CombineInput,
-        allow_ll: bool = False,
+        allow_ll: bool = True,
     ):
         hidden_states, topk_ids, topk_weights = combine_input
         self._update_stage(_Stage.AFTER_DISPATCH_B, _Stage.AFTER_COMBINE_A)
@@ -843,7 +846,7 @@ class DeepEPDispatcher(BaseDispatcher):
 
     def combine_b(
         self,
-        allow_ll: bool = False,
+        allow_ll: bool = True,
     ):
         self._update_stage(_Stage.AFTER_COMBINE_A, _Stage.INITIAL)
         inner_state = self._combine_intermediate_state

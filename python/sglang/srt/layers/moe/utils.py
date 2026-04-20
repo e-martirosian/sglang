@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 _is_npu = is_npu()
 
+
 class MoeA2ABackend(Enum):
 
     NONE = "none"
@@ -127,7 +128,7 @@ class DeepEPMode(Enum):
     def enable_low_latency(self) -> bool:
         return self in [DeepEPMode.LOW_LATENCY, DeepEPMode.AUTO]
 
-    def resolve(self, is_extend_in_batch: bool, allow_ll: bool =  True) -> DeepEPMode:
+    def resolve(self, is_extend_in_batch: bool, allow_ll: bool = True) -> DeepEPMode:
         if self != DeepEPMode.AUTO:
             return self
 
