@@ -57,7 +57,7 @@ class GSM8KAscendMixin(ABC):
             )
         except Exception as e:
             write_github_step_summary(f"Failed to launch server for {cls.model}: {e}")
-            cls.fail(f"Test failed for {cls.model}: {e}")
+            raise AssertionError(f"Test failed for {cls.model}: {e}")
 
     @classmethod
     def tearDownClass(cls):

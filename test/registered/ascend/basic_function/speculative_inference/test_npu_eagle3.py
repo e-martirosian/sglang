@@ -20,7 +20,6 @@ class TestNpuEagle3(GSM8KAscendMixin, CustomTestCase):
     """
 
     model = QWEN3_8B_WEIGHTS_PATH
-    accuracy = 0.81
     other_args = [
         "--trust-remote-code",
         "--attention-backend",
@@ -54,6 +53,8 @@ class TestNpuEagle3(GSM8KAscendMixin, CustomTestCase):
         "SGLANG_ENABLE_OVERLAP_PLAN_STREAM": "1",
         "SGLANG_ENABLE_SPEC_V2": "1",
     }
+
+    accuracy = 0.81
 
 
 if __name__ == "__main__":

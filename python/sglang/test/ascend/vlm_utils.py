@@ -187,9 +187,9 @@ class TestVLMModels(CustomTestCase):
             return server_output
 
         except Exception as e:
+            model_metrics["error"] = e
             print(f"Error testing {self.model}{test_name}: {e}")
             self.fail(f"Test failed for {self.model}{test_name}: {e}")
-            model_metrics["error"] = e
         finally:
             write_results_to_github_step_summary({self.model: model_metrics})
 
