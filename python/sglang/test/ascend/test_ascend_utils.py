@@ -574,10 +574,10 @@ def write_results_to_github_step_summary(results: dict):
         error = metrics.get("error", "")
         status = (
             "✅"
-            if error != "" and metrics["accuracy"] >= metrics["expected_accuracy"]
+            if error == "" and metrics["accuracy"] >= metrics["accuracy_threshold"]
             else "❌ " + error
         )
-        summary += f"| {model} | {metrics['params']} | {metrics['output_throughput']} | {metrics['output_throughput_threshold']} | {metrics['latency']} | {metrics['latency_threshold']} | {metrics['accuracy']:} | {metrics['accuracy_threshold']} | {status} |\n"
+        summary += f"| {model} | {metrics['params']} | {metrics['output_throughput']} | {metrics['output_throughput_threshold']} | {metrics['latency']} | {metrics['latency_threshold']} | {metrics['accuracy']} | {metrics['accuracy_threshold']} | {status} |\n"
     write_github_step_summary(summary)
 
 
