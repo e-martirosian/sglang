@@ -32,7 +32,7 @@ class TestLLaDA2Mini(GSM8KAscendMixin, CustomTestCase):
     ]
     env = {
         **os.environ,
-        "SGLANG_NPU_DISABLE_ACL_FORMAT_WEIGHT": "1",
+        "SGLANG_NPU_DISABLE_ACL_FORMAT_WEIGHT": "1",  # Need to avoid OOM issue
     }
     accuracy = 0.88
     output_throughput = 70
