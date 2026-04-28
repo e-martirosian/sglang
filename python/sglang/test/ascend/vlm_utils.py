@@ -4,6 +4,7 @@ import os
 import subprocess
 
 from sglang.srt.utils import kill_process_tree
+from sglang.test.ascend.test_ascend_utils import write_results_to_github_step_summary
 from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
@@ -115,8 +116,19 @@ class TestVLMModels(CustomTestCase):
         """
         print(f"\nTesting model: {self.model}{test_name}")
 
+        model_metrics = {
+            "params": self.other_args,
+            "accuracy": "-",
+            "accuracy_threshold": self.mmmu_accuracy,
+            "output_throughput": "-",
+            "output_throughput_threshold": "N/A",
+            "latency": "-",
+            "latency_threshold": "N/A",
+        }
+
         process = None
         server_output = ""
+        mmmu_accuracy = None
 
         try:
             # Prepare environment variables
@@ -163,6 +175,8 @@ class TestVLMModels(CustomTestCase):
             if capture_output and process:
                 server_output = self._read_output_from_files()
 
+            model_metrics["accuracy"] = mmmu_accuracy
+
             # Assert performance meets expected threshold
             self.assertGreaterEqual(
                 mmmu_accuracy,
@@ -173,10 +187,12 @@ class TestVLMModels(CustomTestCase):
             return server_output
 
         except Exception as e:
+            model_metrics["error"] = e
             print(f"Error testing {self.model}{test_name}: {e}")
             self.fail(f"Test failed for {self.model}{test_name}: {e}")
-
         finally:
+            write_results_to_github_step_summary({self.model: model_metrics})
+
             # Ensure process cleanup happens regardless of success/failure
             if process is not None and process.poll() is None:
                 print(f"Cleaning up process {process.pid}")
