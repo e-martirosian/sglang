@@ -1,3 +1,4 @@
+import subprocess
 from types import SimpleNamespace
 
 from sglang.test.ascend.test_ascend_utils import write_results_to_github_step_summary
@@ -5,17 +6,16 @@ from sglang.test.run_eval import run_eval
 
 
 class TestMMLU:
-    accuracy_mmlu = 0.00
 
     def test_mmlu(self):
+        accuracy_mmlu_threshold = getattr(self, "accuracy_mmlu", 0.00)
+
         model_metrics = {
-            "params": self.other_args,
-            "accuracy": "-",
-            "accuracy_threshold": self.accuracy_mmlu,
-            "output_throughput": "-",
-            "output_throughput_threshold": "N/A",
-            "latency": "-",
-            "latency_threshold": "N/A",
+            "server": getattr(
+                self, "server_cmd", subprocess.list2cmdline(map(str, self.other_args))
+            ),
+            "client": "simple_eval_mmlu",
+            "accuracy_threshold": getattr(self, "accuracy_mmlu", "N/A"),
         }
 
         try:
@@ -29,7 +29,7 @@ class TestMMLU:
             print("Starting mmlu test...")
             metrics = run_eval(args)
             model_metrics["accuracy"] = metrics["score"]
-            self.assertGreater(metrics["score"], self.accuracy_mmlu)
+            self.assertGreater(metrics["score"], accuracy_mmlu_threshold)
         except Exception as e:
             model_metrics["error"] = e
             self.fail(f"Test failed for {self.model}: {e}")

@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 
 from sglang.test.ascend.gsm8k_ascend_mixin import GSM8KAscendMixin
@@ -53,12 +54,8 @@ class TestPiecewiseGraphPrefillBenchmark(CustomTestCase):
     def test_latency(self):
         print(f"##=== Testing prefill latency: {self.model} ===##")
         model_metrics = {
-            "params": self.other_args,
-            "accuracy": "-",
-            "accuracy_threshold": "N/A",
-            "output_throughput": "-",
-            "output_throughput_threshold": "N/A",
-            "latency": "-",
+            "server": subprocess.list2cmdline(map(str, self.other_args)),
+            "client": "bench_one_batch",
             "latency_threshold": self.latency,
         }
         try:
@@ -66,7 +63,7 @@ class TestPiecewiseGraphPrefillBenchmark(CustomTestCase):
                 self.model,
                 other_args=self.other_args,
             )
-            model_metrics["latency"] = prefill_latency
+            model_metrics["latency"] = float(prefill_latency)
             self.assertLess(prefill_latency, self.latency)
         except Exception as e:
             model_metrics["error"] = e

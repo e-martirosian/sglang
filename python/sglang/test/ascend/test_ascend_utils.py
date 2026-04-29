@@ -564,8 +564,8 @@ def run_bench_serving(
 
 HEADER = """
 ### Models
-| Model | Variant | Output Throughput | Expected Output Throughput | Latency | Expected Latency | Accuracy | Threshold | Status |
-| ----- | ------- | -------- | ------------------ | ------- | ---------------- | -------- | --------- | ------ |
+| Model | Server | Client | Output Throughput | Expected Output Throughput | Latency | Expected Latency | Accuracy | Expected Accuracy | Status |
+| ----- | ------ | ------ | -------- | ------------------ | ------- | ---------------- | -------- | --------- | ------ |
 """
 
 
@@ -575,11 +575,26 @@ def write_results_to_github_step_summary(results: dict):
 
     write_github_step_summary_once(HEADER)
 
+    get_float = lambda metrics, item, precision: (
+        f"{metrics[item]:.{precision}f}"
+        if isinstance(metrics.get(item, "-"), (int, float))
+        else metrics.get(item, "-")
+    )
+
     summary = ""
     for model, metrics in results.items():
+        model = model.replace(MODEL_WEIGHTS_DIR, "").replace(HF_MODEL_WEIGHTS_DIR, "")
+        output_throughput = get_float(metrics, "output_throughput", 2)
+        output_throughput_threshold = metrics.get("output_throughput_threshold", "N/A")
+        accuracy = get_float(metrics, "accuracy", 4)
+        accuracy_threshold = metrics.get("accuracy_threshold", "N/A")
+        latency = get_float(metrics, "latency", 4)
+        latency_threshold = metrics.get("latency_threshold", "N/A")
+        server = metrics.get("server", "N/A")
+        client = metrics.get("client", "N/A")
         error = metrics.get("error", "")
         status = "✅" if error == "" else "❌ " + str(error)
-        summary += f"| {model} | {metrics['params']} | {metrics['output_throughput']} | {metrics['output_throughput_threshold']} | {metrics['latency']} | {metrics['latency_threshold']} | {metrics['accuracy']} | {metrics['accuracy_threshold']} | {status} |\n"
+        summary += f"| {model} | {server} | {client} | {output_throughput} | {output_throughput_threshold} | {latency} | {latency_threshold} | {accuracy} | {accuracy_threshold} | {status} |\n"
     write_github_step_summary(summary)
 
 

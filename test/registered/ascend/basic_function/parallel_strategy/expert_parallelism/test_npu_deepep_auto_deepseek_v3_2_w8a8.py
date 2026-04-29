@@ -19,6 +19,8 @@ class TestDeepEpDeepseekV32(GSM8KAscendMixin, TestMMLU, CustomTestCase):
     """
 
     model = DEEPSEEK_V3_2_W8A8_WEIGHTS_PATH
+
+    timeout_for_server_launch = 60000
     other_args = [
         "--trust-remote-code",
         "--tp-size",

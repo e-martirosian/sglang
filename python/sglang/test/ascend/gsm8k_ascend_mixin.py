@@ -1,4 +1,5 @@
 import os
+import subprocess
 from abc import ABC
 from types import SimpleNamespace
 
@@ -15,8 +16,6 @@ from sglang.test.test_utils import (
 
 class GSM8KAscendMixin(ABC):
     model = ""
-    accuracy = 0.00
-    output_throughput = 0.00
 
     timeout_for_server_launch = DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH
     other_args = [
@@ -27,6 +26,7 @@ class GSM8KAscendMixin(ABC):
         "ascend",
         "--disable-cuda-graph",
     ]
+    server_cmd = ""
     gsm8k_num_shots = 5
     num_questions = 200
 
@@ -55,6 +55,7 @@ class GSM8KAscendMixin(ABC):
                 other_args=cls.other_args,
                 env=cls.env,
             )
+            cls.server_cmd = subprocess.list2cmdline(cls.process.args)
         except Exception as e:
             write_github_step_summary(f"Failed to launch server for {cls.model}: {e}")
             raise AssertionError(f"Test failed for {cls.model}: {e}")
@@ -64,14 +65,14 @@ class GSM8KAscendMixin(ABC):
         kill_process_tree(cls.process.pid)
 
     def test_gsm8k(self):
+        accuracy_threshold = getattr(self, "accuracy", 0.00)
+        output_throughput_threshold = getattr(self, "output_throughput", 0.00)
+
         model_metrics = {
-            "params": self.other_args,
-            "accuracy": "-",
-            "accuracy_threshold": self.accuracy,
-            "output_throughput": "-",
-            "output_throughput_threshold": self.output_throughput,
-            "latency": "-",
-            "latency_threshold": "N/A",
+            "server": self.server_cmd,
+            "client": "few_shot_gsm8k",
+            "accuracy_threshold": getattr(self, "accuracy", "N/A"),
+            "output_throughput_threshold": getattr(self, "output_throughput", "N/A"),
         }
 
         try:
@@ -89,13 +90,13 @@ class GSM8KAscendMixin(ABC):
             model_metrics["output_throughput"] = metrics["output_throughput"]
             self.assertGreaterEqual(
                 metrics["accuracy"],
-                self.accuracy,
-                f'Accuracy of {self.model} is {str(metrics["accuracy"])}, is lower than {self.accuracy}',
+                accuracy_threshold,
+                f'Accuracy of {self.model} is {str(metrics["accuracy"])}, is lower than {accuracy_threshold}',
             )
             self.assertGreaterEqual(
                 metrics["output_throughput"],
-                self.output_throughput,
-                f'Output throughput of {self.model} is {str(metrics["output_throughput"])}, is lower than {self.output_throughput}',
+                output_throughput_threshold,
+                f'Output throughput of {self.model} is {str(metrics["output_throughput"])}, is lower than {output_throughput_threshold}',
             )
         except Exception as e:
             model_metrics["error"] = e

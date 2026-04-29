@@ -97,6 +97,8 @@ class TestVLMModels(CustomTestCase):
             timeout=3600,
         )
 
+        return subprocess.list2cmdline(cmd)  # Return the command for logging purposes
+
     def _run_vlm_mmmu_test(
         self,
         output_path="./logs",
@@ -117,13 +119,9 @@ class TestVLMModels(CustomTestCase):
         print(f"\nTesting model: {self.model}{test_name}")
 
         model_metrics = {
-            "params": self.other_args,
-            "accuracy": "-",
+            "server": subprocess.list2cmdline(map(str, self.other_args)),
+            "client": "mmmu_eval",
             "accuracy_threshold": self.mmmu_accuracy,
-            "output_throughput": "-",
-            "output_throughput_threshold": "N/A",
-            "latency": "-",
-            "latency_threshold": "N/A",
         }
 
         process = None
@@ -155,8 +153,10 @@ class TestVLMModels(CustomTestCase):
                 ),
             )
 
+            model_metrics["server"] = subprocess.list2cmdline(process.args)
+
             # Run evaluation
-            self.run_mmmu_eval(self.model, output_path, limit)
+            model_metrics["client"] = self.run_mmmu_eval(self.model, output_path, limit)
 
             # Get the result file
             result_file_path = glob.glob(f"{output_path}/*.json")[0]

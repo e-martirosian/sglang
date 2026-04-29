@@ -20,6 +20,7 @@ class TestNpuEagle3(GSM8KAscendMixin, CustomTestCase):
     """
 
     model = QWEN3_8B_WEIGHTS_PATH
+    timeout_for_server_launch = 1500
     other_args = [
         "--trust-remote-code",
         "--attention-backend",
@@ -55,6 +56,7 @@ class TestNpuEagle3(GSM8KAscendMixin, CustomTestCase):
     }
 
     accuracy = 0.81
+    num_questions = 1319
 
 
 if __name__ == "__main__":
