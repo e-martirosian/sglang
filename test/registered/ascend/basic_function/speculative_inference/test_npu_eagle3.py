@@ -52,12 +52,10 @@ class TestNpuEagle3(GSM8KAscendMixin, CustomTestCase):
     env = {
         **os.environ,
         "SGLANG_ENABLE_OVERLAP_PLAN_STREAM": "1",
-        "SGLANG_ENABLE_SPEC_V2": "1",
     }
 
     accuracy = 0.81
     num_questions = 1319
-
 
 if __name__ == "__main__":
     unittest.main()
