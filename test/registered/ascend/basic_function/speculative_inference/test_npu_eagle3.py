@@ -57,5 +57,6 @@ class TestNpuEagle3(GSM8KAscendMixin, CustomTestCase):
     accuracy = 0.81
     num_questions = 1319
 
+
 if __name__ == "__main__":
     unittest.main()
