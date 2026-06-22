@@ -44,7 +44,7 @@ Z_IMAGE_TURBO_WEIGHTS_PATH = os.path.join(
 SANA_WM_MODEL_WEIGHTS_PATH = os.path.join(
     MODEL_WEIGHTS_DIR, "Efficient-Large-Model/SANA-WM_bidirectional"
 )
-EXTRAS_DISABLE_WARMUP = ["--warmup-mode", "off"]
+EXTRAS_DISABLE_WARMUP = ["--warmup-mode", "request"]
 
 ONE_NPU_CASES: list[DiffusionTestCase] = [
     # === Text to Image (T2I) ===
