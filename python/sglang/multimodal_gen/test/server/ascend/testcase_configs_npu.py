@@ -10,11 +10,26 @@ from sglang.multimodal_gen.test.server.testcase_configs import (
 
 MODEL_WEIGHTS_DIR = "/root/.cache/modelscope/hub/models/"
 
+ERNIE_IMAGE_WEIGHTS_PATH = os.path.join(
+    MODEL_WEIGHTS_DIR, "PaddlePaddle/ERNIE-Image"
+)
+GLM_IMAGE_WEIGHTS_PATH = os.path.join(
+    MODEL_WEIGHTS_DIR, "ZhipuAI/GLM-Image"
+)
+HUNYUAN_3D_2_WEIGHTS_PATH = os.path.join(
+    MODEL_WEIGHTS_DIR, "Tencent-Hunyuan/Hunyuan3D-2"
+)
+HUNYUAN_VIDEO_WEIGHTS_PATH = os.path.join(
+    MODEL_WEIGHTS_DIR, "AI-ModelScope/HunyuanVideo"
+)
 FLUX_1_DEV_WEIGHTS_PATH = os.path.join(
     MODEL_WEIGHTS_DIR, "black-forest-labs/FLUX.1-dev"
 )
 FLUX_2_DEV_WEIGHTS_PATH = os.path.join(
     MODEL_WEIGHTS_DIR, "black-forest-labs/FLUX.2-dev"
+)
+FLUX_2_KLEIN_4B_WEIGHTS_PATH = os.path.join(
+    MODEL_WEIGHTS_DIR, "black-forest-labs/FLUX.2-klein-4B"
 )
 QWEN_IMAGE_WEIGHTS_PATH = os.path.join(MODEL_WEIGHTS_DIR, "Qwen/Qwen-Image")
 WAN2_1_T2V_1_3B_DIFFUSERS_WEIGHTS_PATH = os.path.join(
@@ -23,20 +38,59 @@ WAN2_1_T2V_1_3B_DIFFUSERS_WEIGHTS_PATH = os.path.join(
 WAN2_2_T2V_A14B_DIFFUSERS_W8A8_WEIGHTS_PATH = os.path.join(
     MODEL_WEIGHTS_DIR, "Eco-Tech/Wan2.2-T2V-A14B-Diffusers-w8a8"
 )
-
+Z_IMAGE_TURBO_WEIGHTS_PATH = os.path.join(
+    MODEL_WEIGHTS_DIR, "Tongyi-MAI/Z-Image-Turbo"
+)
+SANA_WM_MODEL_WEIGHTS_PATH = os.path.join(
+    MODEL_WEIGHTS_DIR, "Efficient-Large-Model/SANA-WM_bidirectional"
+)
 EXTRAS_DISABLE_WARMUP = ["--warmup-mode", "off"]
 
 ONE_NPU_CASES: list[DiffusionTestCase] = [
     # === Text to Image (T2I) ===
     DiffusionTestCase(
-        "flux_image_t2i_npu",
+        "glm_image_t2i_1_npu",
+        DiffusionServerArgs(
+            model_path=GLM_IMAGE_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        T2I_sampling_params,
+    ),
+    DiffusionTestCase(
+        "flux_1_dev_t2i_1_npu",
         DiffusionServerArgs(
             model_path=FLUX_1_DEV_WEIGHTS_PATH,
             extras=EXTRAS_DISABLE_WARMUP,
         ),
         T2I_sampling_params,
     ),
+    DiffusionTestCase(
+        "flux_2_klein_4b_t2i_1_npu",
+        DiffusionServerArgs(
+            model_path=FLUX_2_KLEIN_4B_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        T2I_sampling_params,
+    ),
+    DiffusionTestCase(
+        "z_image_turbo_t2i_1_npu",
+        DiffusionServerArgs(
+            model_path=Z_IMAGE_TURBO_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        T2I_sampling_params,
+    ),
     # === Text to Video (T2V) ===
+    DiffusionTestCase(
+        "hunyuan_video_t2v_1_npu",
+        DiffusionServerArgs(
+            model_path=HUNYUAN_VIDEO_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        DiffusionSamplingParams(
+            prompt=T2V_PROMPT,
+        ),
+    ),
     DiffusionTestCase(
         "wan2_1_t2v_1.3b_1_npu",
         DiffusionServerArgs(
@@ -74,6 +128,17 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
         T2I_sampling_params,
     ),
     # === Text to Video (T2V) ===
+    DiffusionTestCase(
+        "sana_wm_bidirectional_t2v_2npu",
+        DiffusionServerArgs(
+            model_path=SANA_WM_MODEL_WEIGHTS_PATH,
+            num_gpus=2,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        DiffusionSamplingParams(
+            prompt=T2V_PROMPT,
+        ),
+    ),
     DiffusionTestCase(
         "wan2_2_t2v_14b_w8a8_2npu",
         DiffusionServerArgs(
