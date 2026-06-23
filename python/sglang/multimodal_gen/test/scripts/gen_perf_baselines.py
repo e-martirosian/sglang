@@ -23,7 +23,7 @@ from sglang.multimodal_gen.test.test_utils import (
 
 
 def _all_cases() -> list[DiffusionTestCase]:
-    import sglang.multimodal_gen.test.server.testcase_configs as cfg
+    import sglang.multimodal_gen.test.server.ascend.testcase_configs_npu as cfg
 
     cases: list[DiffusionTestCase] = []
     for _, v in inspect.getmembers(cfg):

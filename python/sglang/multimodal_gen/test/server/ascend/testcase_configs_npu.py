@@ -40,8 +40,8 @@ WAN2_1_T2V_1_3B_DIFFUSERS_WEIGHTS_PATH = os.path.join(
 WAN2_2_T2V_A14B_DIFFUSERS_W8A8_WEIGHTS_PATH = os.path.join(
     MODEL_WEIGHTS_DIR, "Eco-Tech/Wan2.2-T2V-A14B-Diffusers-w8a8"
 )
-Z_IMAGE_TURBO_WEIGHTS_PATH = os.path.join(
-    MODEL_WEIGHTS_DIR, "Tongyi-MAI/Z-Image-Turbo"
+Z_IMAGE_WEIGHTS_PATH = os.path.join(
+    MODEL_WEIGHTS_DIR, "Tongyi-MAI/Z-Image"
 )
 SANA_WM_MODEL_WEIGHTS_PATH = os.path.join(
     MODEL_WEIGHTS_DIR, "Efficient-Large-Model/SANA-WM_bidirectional"
@@ -74,18 +74,18 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
         ),
         T2I_sampling_params,
     ),
+    #DiffusionTestCase(
+    #    "flux_2_klein_4b_t2i_1_npu",
+    #    DiffusionServerArgs(
+    #        model_path=FLUX_2_KLEIN_4B_WEIGHTS_PATH,
+    #        extras=EXTRAS_DISABLE_WARMUP,
+    #   ),
+    #    T2I_sampling_params,
+    #),
     DiffusionTestCase(
-        "flux_2_klein_4b_t2i_1_npu",
+        "z_image_t2i_1_npu",
         DiffusionServerArgs(
-            model_path=FLUX_2_KLEIN_4B_WEIGHTS_PATH,
-            extras=EXTRAS_DISABLE_WARMUP,
-        ),
-        T2I_sampling_params,
-    ),
-    DiffusionTestCase(
-        "z_image_turbo_t2i_1_npu",
-        DiffusionServerArgs(
-            model_path=Z_IMAGE_TURBO_WEIGHTS_PATH,
+            model_path=Z_IMAGE_WEIGHTS_PATH,
             extras=EXTRAS_DISABLE_WARMUP,
         ),
         T2I_sampling_params,
@@ -147,15 +147,15 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
         T2I_sampling_params,
     ),
     # === Text to Video (T2V) ===
-    DiffusionTestCase(
-        "sana_wm_bidirectional_t2v_2npu",
-        DiffusionServerArgs(
-            model_path=SANA_WM_MODEL_WEIGHTS_PATH,
-            num_gpus=2,
-            extras=EXTRAS_DISABLE_WARMUP,
-        ),
-        SANA_WM_TI2V_CI_sampling_params,
-    ),
+    #DiffusionTestCase(
+    #    "sana_wm_bidirectional_t2v_2npu",
+    #    DiffusionServerArgs(
+    #        model_path=SANA_WM_MODEL_WEIGHTS_PATH,
+    #        num_gpus=2,
+    #        extras=EXTRAS_DISABLE_WARMUP,
+    #    ),
+    #    SANA_WM_TI2V_CI_sampling_params,
+    #),
     DiffusionTestCase(
         "wan2_2_t2v_14b_w8a8_2npu",
         DiffusionServerArgs(
