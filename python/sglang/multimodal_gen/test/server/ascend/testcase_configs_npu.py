@@ -6,6 +6,8 @@ from sglang.multimodal_gen.test.server.testcase_configs import (
     DiffusionServerArgs,
     DiffusionTestCase,
     T2I_sampling_params,
+    SANA_WM_TI2V_CI_sampling_params,
+    HUNYUAN3D_SHAPE_sampling_params,
 )
 
 MODEL_WEIGHTS_DIR = "/root/.cache/modelscope/hub/models/"
@@ -49,6 +51,14 @@ EXTRAS_DISABLE_WARMUP = ["--warmup-mode", "request"]
 ONE_NPU_CASES: list[DiffusionTestCase] = [
     # === Text to Image (T2I) ===
     DiffusionTestCase(
+        "ernie_image_t2i_1_npu",
+        DiffusionServerArgs(
+            model_path=ERNIE_IMAGE_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        T2I_sampling_params,
+    ),
+    DiffusionTestCase(
         "glm_image_t2i_1_npu",
         DiffusionServerArgs(
             model_path=GLM_IMAGE_WEIGHTS_PATH,
@@ -79,6 +89,15 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
             extras=EXTRAS_DISABLE_WARMUP,
         ),
         T2I_sampling_params,
+    ),
+    # === Image to Mesh (I2M) ===
+    DiffusionTestCase(
+        "hunyuan_3d_2_i2m_1_npu",
+        DiffusionServerArgs(
+            model_path=HUNYUAN_3D_2_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        HUNYUAN3D_SHAPE_sampling_params,
     ),
     # === Text to Video (T2V) ===
     DiffusionTestCase(
@@ -135,9 +154,7 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
             num_gpus=2,
             extras=EXTRAS_DISABLE_WARMUP,
         ),
-        DiffusionSamplingParams(
-            prompt=T2V_PROMPT,
-        ),
+        SANA_WM_TI2V_CI_sampling_params,
     ),
     DiffusionTestCase(
         "wan2_2_t2v_14b_w8a8_2npu",
