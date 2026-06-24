@@ -497,6 +497,26 @@
             "expected_e2e_ms": 36940.12,
             "expected_avg_denoise_ms": 732.82,
             "expected_median_denoise_ms": 732.5
-        }
+        },
+        "flux_2_klein_4b_t2i_1_npu": {
+            "stages_ms": {
+                "InputValidationStage": 0.07,
+                "TextEncodingStage": 232.96,
+                "ImageVAEEncodingStage": 0.01,
+                "LatentPreparationStage": 0.57,
+                "TimestepPreparationStage": 29.26,
+                "DenoisingStage": 992.79,
+                "DecodingStage": 10.76
+            },
+            "denoise_step_ms": {
+                "0": 37.78,
+                "1": 35.77,
+                "2": 34.34,
+                "3": 34.91
+            },
+            "expected_e2e_ms": 1317.11,
+            "expected_avg_denoise_ms": 35.7,
+            "expected_median_denoise_ms": 35.34
+         }
     }
 }
