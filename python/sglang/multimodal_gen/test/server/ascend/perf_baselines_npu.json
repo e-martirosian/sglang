@@ -70,7 +70,7 @@
             "expected_avg_denoise_ms": 399.24,
             "expected_median_denoise_ms": 413.41
         },
-        "flux_2_image_t2i_2npu": {
+        "flux_2_dev_t2i_2npu": {
             "stages_ms": {
                 "InputValidationStage": 0.08,
                 "TextEncodingStage": 192.4,

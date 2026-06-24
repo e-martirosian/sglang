@@ -122,7 +122,7 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
 TWO_NPU_CASES: list[DiffusionTestCase] = [
     # === Text to Image (T2I) ===
     DiffusionTestCase(
-        "flux_2_image_t2i_2npu",
+        "flux_2_dev_t2i_2npu",
         DiffusionServerArgs(
             model_path=FLUX_2_DEV_WEIGHTS_PATH,
             num_gpus=2,
