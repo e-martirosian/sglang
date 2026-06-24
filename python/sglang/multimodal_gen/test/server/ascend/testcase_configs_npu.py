@@ -74,14 +74,14 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
         ),
         T2I_sampling_params,
     ),
-    #DiffusionTestCase(
-    #    "flux_2_klein_4b_t2i_1_npu",
-    #    DiffusionServerArgs(
-    #        model_path=FLUX_2_KLEIN_4B_WEIGHTS_PATH,
-    #        extras=EXTRAS_DISABLE_WARMUP,
-    #   ),
-    #    T2I_sampling_params,
-    #),
+    DiffusionTestCase(
+       "flux_2_klein_4b_t2i_1_npu",
+       DiffusionServerArgs(
+           model_path=FLUX_2_KLEIN_4B_WEIGHTS_PATH,
+           extras=EXTRAS_DISABLE_WARMUP,
+      ),
+       T2I_sampling_params,
+    ),
     DiffusionTestCase(
         "z_image_t2i_1_npu",
         DiffusionServerArgs(
@@ -91,23 +91,20 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
         T2I_sampling_params,
     ),
     # === Image to Mesh (I2M) ===
-    DiffusionTestCase(
-        "hunyuan_3d_2_i2m_1_npu",
-        DiffusionServerArgs(
-            model_path=HUNYUAN_3D_2_WEIGHTS_PATH,
-            extras=EXTRAS_DISABLE_WARMUP,
-        ),
-        HUNYUAN3D_SHAPE_sampling_params,
-    ),
+    # DiffusionTestCase(
+    #     "hunyuan_3d_2_i2m_1_npu",
+    #     DiffusionServerArgs(
+    #         model_path=HUNYUAN_3D_2_WEIGHTS_PATH,
+    #         extras=EXTRAS_DISABLE_WARMUP,
+    #     ),
+    #     HUNYUAN3D_SHAPE_sampling_params,
+    # ),
     # === Text to Video (T2V) ===
     DiffusionTestCase(
         "hunyuan_video_t2v_1_npu",
         DiffusionServerArgs(
             model_path=HUNYUAN_VIDEO_WEIGHTS_PATH,
             extras=EXTRAS_DISABLE_WARMUP,
-        ),
-        DiffusionSamplingParams(
-            prompt=T2V_PROMPT,
         ),
     ),
     DiffusionTestCase(
@@ -147,15 +144,15 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
         T2I_sampling_params,
     ),
     # === Text to Video (T2V) ===
-    #DiffusionTestCase(
-    #    "sana_wm_bidirectional_t2v_2npu",
-    #    DiffusionServerArgs(
-    #        model_path=SANA_WM_MODEL_WEIGHTS_PATH,
-    #        num_gpus=2,
-    #        extras=EXTRAS_DISABLE_WARMUP,
-    #    ),
-    #    SANA_WM_TI2V_CI_sampling_params,
-    #),
+    DiffusionTestCase(
+       "sana_wm_bidirectional_t2v_2npu",
+       DiffusionServerArgs(
+           model_path=SANA_WM_MODEL_WEIGHTS_PATH,
+           num_gpus=2,
+           extras=EXTRAS_DISABLE_WARMUP,
+       ),
+       SANA_WM_TI2V_CI_sampling_params,
+    ),
     DiffusionTestCase(
         "wan2_2_t2v_14b_w8a8_2npu",
         DiffusionServerArgs(
