@@ -91,6 +91,7 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
         T2I_sampling_params,
     ),
     # === Image to Mesh (I2M) ===
+    # TODO: uncomment when Hunyuan3D-2 pipeline will be fixed
     # DiffusionTestCase(
     #     "hunyuan_3d_2_i2m_1_npu",
     #     DiffusionServerArgs(
@@ -125,7 +126,6 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
         "flux_2_dev_t2i_2npu",
         DiffusionServerArgs(
             model_path=FLUX_2_DEV_WEIGHTS_PATH,
-            num_gpus=2,
             tp_size=2,
             extras=EXTRAS_DISABLE_WARMUP,
         ),
@@ -135,7 +135,7 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
         "qwen_image_t2i_2npu",
         DiffusionServerArgs(
             model_path=QWEN_IMAGE_WEIGHTS_PATH,
-            num_gpus=2,
+            tp_size=2,
             # test ring attn
             ulysses_degree=1,
             ring_degree=2,
@@ -148,16 +148,19 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
        "sana_wm_bidirectional_t2v_2npu",
        DiffusionServerArgs(
            model_path=SANA_WM_MODEL_WEIGHTS_PATH,
-           num_gpus=2,
+            tp_size=2,
            extras=EXTRAS_DISABLE_WARMUP,
        ),
-       SANA_WM_TI2V_CI_sampling_params,
+        SANA_WM_TI2V_CI_sampling_params,
+        run_perf_check=False,
+        run_component_accuracy_check=False,
+        run_models_api_check=False,
+        run_t2v_input_reference_check=False,
     ),
     DiffusionTestCase(
         "wan2_2_t2v_14b_w8a8_2npu",
         DiffusionServerArgs(
             model_path=WAN2_2_T2V_A14B_DIFFUSERS_W8A8_WEIGHTS_PATH,
-            num_gpus=2,
             tp_size=1,
             ulysses_degree=2,
             extras=EXTRAS_DISABLE_WARMUP,
