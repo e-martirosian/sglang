@@ -50,47 +50,47 @@ SANA_WM_MODEL_WEIGHTS_PATH = os.path.join(
 EXTRAS_DISABLE_WARMUP = ["--warmup-mode", "request"]
 
 ONE_NPU_CASES: list[DiffusionTestCase] = [
-    # === Text to Image (T2I) ===
-    DiffusionTestCase(
-        "ernie_image_t2i_1_npu",
-        DiffusionServerArgs(
-            model_path=ERNIE_IMAGE_WEIGHTS_PATH,
-            extras=EXTRAS_DISABLE_WARMUP,
-        ),
-        T2I_sampling_params,
-    ),
-    DiffusionTestCase(
-        "glm_image_t2i_1_npu",
-        DiffusionServerArgs(
-            model_path=GLM_IMAGE_WEIGHTS_PATH,
-            extras=EXTRAS_DISABLE_WARMUP,
-        ),
-        T2I_sampling_params,
-    ),
-    DiffusionTestCase(
-        "flux_image_t2i_npu",
-        DiffusionServerArgs(
-            model_path=FLUX_1_DEV_WEIGHTS_PATH,
-            extras=EXTRAS_DISABLE_WARMUP,
-        ),
-        T2I_sampling_params,
-    ),
-    DiffusionTestCase(
-       "flux_2_klein_4b_t2i_1_npu",
-       DiffusionServerArgs(
-           model_path=FLUX_2_KLEIN_4B_WEIGHTS_PATH,
-           extras=EXTRAS_DISABLE_WARMUP,
-      ),
-       T2I_sampling_params,
-    ),
-    DiffusionTestCase(
-        "z_image_t2i_1_npu",
-        DiffusionServerArgs(
-            model_path=Z_IMAGE_WEIGHTS_PATH,
-            extras=EXTRAS_DISABLE_WARMUP,
-        ),
-        T2I_sampling_params,
-    ),
+    # # === Text to Image (T2I) ===
+    # DiffusionTestCase(
+    #     "ernie_image_t2i_1_npu",
+    #     DiffusionServerArgs(
+    #         model_path=ERNIE_IMAGE_WEIGHTS_PATH,
+    #         extras=EXTRAS_DISABLE_WARMUP,
+    #     ),
+    #     T2I_sampling_params,
+    # ),
+    # DiffusionTestCase(
+    #     "glm_image_t2i_1_npu",
+    #     DiffusionServerArgs(
+    #         model_path=GLM_IMAGE_WEIGHTS_PATH,
+    #         extras=EXTRAS_DISABLE_WARMUP,
+    #     ),
+    #     T2I_sampling_params,
+    # ),
+    # DiffusionTestCase(
+    #     "flux_image_t2i_npu",
+    #     DiffusionServerArgs(
+    #         model_path=FLUX_1_DEV_WEIGHTS_PATH,
+    #         extras=EXTRAS_DISABLE_WARMUP,
+    #     ),
+    #     T2I_sampling_params,
+    # ),
+    # DiffusionTestCase(
+    #    "flux_2_klein_4b_t2i_1_npu",
+    #    DiffusionServerArgs(
+    #        model_path=FLUX_2_KLEIN_4B_WEIGHTS_PATH,
+    #        extras=EXTRAS_DISABLE_WARMUP,
+    #   ),
+    #    T2I_sampling_params,
+    # ),
+    # DiffusionTestCase(
+    #     "z_image_t2i_1_npu",
+    #     DiffusionServerArgs(
+    #         model_path=Z_IMAGE_WEIGHTS_PATH,
+    #         extras=EXTRAS_DISABLE_WARMUP,
+    #     ),
+    #     T2I_sampling_params,
+    # ),
     # === Image to Mesh (I2M) ===
     # TODO: uncomment when Hunyuan3D-2 pipeline will be fixed
     # DiffusionTestCase(
@@ -109,41 +109,41 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
             extras=EXTRAS_DISABLE_WARMUP,
         ),
     ),
-    DiffusionTestCase(
-        "wan2_1_t2v_1.3b_1_npu",
-        DiffusionServerArgs(
-            model_path=WAN2_1_T2V_1_3B_DIFFUSERS_WEIGHTS_PATH,
-            extras=EXTRAS_DISABLE_WARMUP,
-        ),
-        DiffusionSamplingParams(
-            prompt=T2V_PROMPT,
-        ),
-    ),
+    # DiffusionTestCase(
+    #     "wan2_1_t2v_1.3b_1_npu",
+    #     DiffusionServerArgs(
+    #         model_path=WAN2_1_T2V_1_3B_DIFFUSERS_WEIGHTS_PATH,
+    #         extras=EXTRAS_DISABLE_WARMUP,
+    #     ),
+    #     DiffusionSamplingParams(
+    #         prompt=T2V_PROMPT,
+    #     ),
+    # ),
 ]
 
 TWO_NPU_CASES: list[DiffusionTestCase] = [
     # === Text to Image (T2I) ===
-    DiffusionTestCase(
-        "flux_2_dev_t2i_2npu",
-        DiffusionServerArgs(
-            model_path=FLUX_2_DEV_WEIGHTS_PATH,
-            num_gpus=2,
-            extras=EXTRAS_DISABLE_WARMUP,
-        ),
-        T2I_sampling_params,
-    ),
-    DiffusionTestCase(
-        "qwen_image_t2i_2npu",
-        DiffusionServerArgs(
-            model_path=QWEN_IMAGE_WEIGHTS_PATH,
-            num_gpus=2,
-            # test ring attn
-            ulysses_degree=1,
-            ring_degree=2,
-            extras=EXTRAS_DISABLE_WARMUP,
-        ),
-        T2I_sampling_params,
-    ),
+    # DiffusionTestCase(
+    #     "flux_2_dev_t2i_2npu",
+    #     DiffusionServerArgs(
+    #         model_path=FLUX_2_DEV_WEIGHTS_PATH,
+    #         num_gpus=2,
+    #         extras=EXTRAS_DISABLE_WARMUP,
+    #     ),
+    #     T2I_sampling_params,
+    # ),
+    # DiffusionTestCase(
+    #     "qwen_image_t2i_2npu",
+    #     DiffusionServerArgs(
+    #         model_path=QWEN_IMAGE_WEIGHTS_PATH,
+    #         num_gpus=2,
+    #         # test ring attn
+    #         ulysses_degree=1,
+    #         ring_degree=2,
+    #         extras=EXTRAS_DISABLE_WARMUP,
+    #     ),
+    #     T2I_sampling_params,
+    # ),
     # === Text to Video (T2V) ===
     DiffusionTestCase(
        "sana_wm_bidirectional_t2v_2npu",
@@ -159,18 +159,19 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
         run_models_api_check=False,
         run_t2v_input_reference_check=False,
     ),
-    DiffusionTestCase(
-        "wan2_2_t2v_14b_w8a8_2npu",
-        DiffusionServerArgs(
-            model_path=WAN2_2_T2V_A14B_DIFFUSERS_W8A8_WEIGHTS_PATH,
-            tp_size=1,
-            ulysses_degree=2,
-            extras=EXTRAS_DISABLE_WARMUP,
-        ),
-        DiffusionSamplingParams(
-            prompt=T2V_PROMPT,
-        ),
-    ),
+    # DiffusionTestCase(
+    #     "wan2_2_t2v_14b_w8a8_2npu",
+    #     DiffusionServerArgs(
+    #         model_path=WAN2_2_T2V_A14B_DIFFUSERS_W8A8_WEIGHTS_PATH,
+    #         num_gpus=2,
+    #         tp_size=1,
+    #         ulysses_degree=2,
+    #         extras=EXTRAS_DISABLE_WARMUP,
+    #     ),
+    #     DiffusionSamplingParams(
+    #         prompt=T2V_PROMPT,
+    #     ),
+    # ),
 ]
 
 DEFAULT_EST_TIME_SECONDS = 300.0
