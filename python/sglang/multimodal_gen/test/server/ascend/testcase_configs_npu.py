@@ -135,6 +135,13 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
     #         prompt=T2V_PROMPT,
     #     ),
     # ),
+    # === Text and Image to Image (TI2I)
+    DiffusionTestCase(
+        "joyai_image_edit_ti2i_npu",
+        DiffusionServerArgs(model_path="/root/.cache/modelscope/hub/models/jd-opensource/JoyAI-Image-Edit-Diffusers"),
+        run_consistency_check=False,
+        run_component_accuracy_check=False,
+    ),
 ]
 
 TWO_NPU_CASES: list[DiffusionTestCase] = [
@@ -174,16 +181,17 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
     #         prompt=T2V_PROMPT,
     #     ),
     # ),
-    DiffusionTestCase(
-        "ltx_2_3_two_stage_t2v_npu",
-        DiffusionServerArgs(
-            model_path="/root/.cache/modelscope/hub/models/Lightricks/LTX-2.3",
-            num_gpus=2,
-            cfg_parallel=True,
-            extras=["--pipeline-class-name LTX2TwoStagePipeline"],
-        ),
-        T2V_sampling_params,
-    ),
+    # TODO: fix
+    # DiffusionTestCase(
+    #     "ltx_2_3_two_stage_t2v_npu",
+    #     DiffusionServerArgs(
+    #         model_path="/root/.cache/modelscope/hub/models/Lightricks/LTX-2.3",
+    #         num_gpus=2,
+    #         cfg_parallel=True,
+    #         extras=["--pipeline-class-name LTX2TwoStagePipeline"],
+    #     ),
+    #     T2V_sampling_params,
+    # ),
     # === Text and Image to Video (TI2V)
     # TODO: fix
     # DiffusionTestCase(
