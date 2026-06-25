@@ -10,23 +10,33 @@ from sglang.multimodal_gen.test.server.testcase_configs import (
 
 MODELSCOPE_MODEL_WEIGHTS_DIR = "/root/.cache/modelscope/hub/models/"
 
+
 def use_modelscope(name: str):
     return os.path.join(MODELSCOPE_MODEL_WEIGHTS_DIR, name)
+
 
 COSMOS3_NANO_WEIGHTS_PATH = use_modelscope("nv-community/Cosmos3-Nano")
 ERNIE_IMAGE_WEIGHTS_PATH = use_modelscope("PaddlePaddle/ERNIE-Image")
 GLM_IMAGE_WEIGHTS_PATH = use_modelscope("ZhipuAI/GLM-Image")
 HUNYUAN_3D_2_WEIGHTS_PATH = use_modelscope("Tencent-Hunyuan/Hunyuan3D-2")
-JOYAI_IMAGE_EDIT_WEIGHTS_PATH = use_modelscope("jd-opensource/JoyAI-Image-Edit-Diffusers")
+JOYAI_IMAGE_EDIT_WEIGHTS_PATH = use_modelscope(
+    "jd-opensource/JoyAI-Image-Edit-Diffusers"
+)
 MOVA_360_WEIGHTS_PATH = use_modelscope("openmoss/MOVA-360p")
 FLUX_1_DEV_WEIGHTS_PATH = use_modelscope("black-forest-labs/FLUX.1-dev")
 FLUX_2_DEV_WEIGHTS_PATH = use_modelscope("black-forest-labs/FLUX.2-dev")
 FLUX_2_KLEIN_4B_WEIGHTS_PATH = use_modelscope("black-forest-labs/FLUX.2-klein-4B")
 QWEN_IMAGE_WEIGHTS_PATH = use_modelscope("Qwen/Qwen-Image")
-WAN2_1_T2V_1_3B_DIFFUSERS_WEIGHTS_PATH =use_modelscope("Wan-AI/Wan2.1-T2V-1.3B-Diffusers")
-WAN2_2_T2V_A14B_DIFFUSERS_W8A8_WEIGHTS_PATH = use_modelscope("Eco-Tech/Wan2.2-T2V-A14B-Diffusers-w8a8")
+WAN2_1_T2V_1_3B_DIFFUSERS_WEIGHTS_PATH = use_modelscope(
+    "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+)
+WAN2_2_T2V_A14B_DIFFUSERS_W8A8_WEIGHTS_PATH = use_modelscope(
+    "Eco-Tech/Wan2.2-T2V-A14B-Diffusers-w8a8"
+)
 Z_IMAGE_WEIGHTS_PATH = use_modelscope("Tongyi-MAI/Z-Image")
-SANA_WM_MODEL_WEIGHTS_PATH = use_modelscope("Efficient-Large-Model/SANA-WM_bidirectional")
+SANA_WM_MODEL_WEIGHTS_PATH = use_modelscope(
+    "Efficient-Large-Model/SANA-WM_bidirectional"
+)
 
 EXTRAS_DISABLE_WARMUP = ["--warmup-mode", "request"]
 
@@ -85,13 +95,13 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
         T2I_sampling_params,
     ),
     DiffusionTestCase(
-       "flux_2_klein_4b_t2i_1_npu",
-       DiffusionServerArgs(
-           model_path=FLUX_2_KLEIN_4B_WEIGHTS_PATH,
-           extras=EXTRAS_DISABLE_WARMUP,
-      ),
-       T2I_sampling_params,
-       run_consistency_check=False,
+        "flux_2_klein_4b_t2i_1_npu",
+        DiffusionServerArgs(
+            model_path=FLUX_2_KLEIN_4B_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        T2I_sampling_params,
+        run_consistency_check=False,
     ),
     DiffusionTestCase(
         "z_image_t2i_1_npu",
