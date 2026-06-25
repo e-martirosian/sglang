@@ -5,7 +5,7 @@
         "description": "Reference numbers captured from the CI diffusion server baseline run"
     },
     "scenarios": {
-        "flux_1_dev_t2i_1_npu": {
+        "flux_image_t2i_npu": {
             "stages_ms": {
                 "InputValidationStage": 0.06,
                 "TextEncodingStage": 468.6,

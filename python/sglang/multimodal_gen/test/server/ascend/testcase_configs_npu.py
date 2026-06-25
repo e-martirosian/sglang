@@ -46,6 +46,7 @@ Z_IMAGE_WEIGHTS_PATH = os.path.join(
 SANA_WM_MODEL_WEIGHTS_PATH = os.path.join(
     MODEL_WEIGHTS_DIR, "Efficient-Large-Model/SANA-WM_bidirectional"
 )
+
 EXTRAS_DISABLE_WARMUP = ["--warmup-mode", "request"]
 
 ONE_NPU_CASES: list[DiffusionTestCase] = [
@@ -67,7 +68,7 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
         T2I_sampling_params,
     ),
     DiffusionTestCase(
-        "flux_1_dev_t2i_1_npu",
+        "flux_image_t2i_npu",
         DiffusionServerArgs(
             model_path=FLUX_1_DEV_WEIGHTS_PATH,
             extras=EXTRAS_DISABLE_WARMUP,
@@ -126,7 +127,7 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
         "flux_2_dev_t2i_2npu",
         DiffusionServerArgs(
             model_path=FLUX_2_DEV_WEIGHTS_PATH,
-            tp_size=2,
+            num_gpus=2,
             extras=EXTRAS_DISABLE_WARMUP,
         ),
         T2I_sampling_params,
@@ -135,7 +136,7 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
         "qwen_image_t2i_2npu",
         DiffusionServerArgs(
             model_path=QWEN_IMAGE_WEIGHTS_PATH,
-            tp_size=2,
+            num_gpus=2,
             # test ring attn
             ulysses_degree=1,
             ring_degree=2,
@@ -148,6 +149,7 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
        "sana_wm_bidirectional_t2v_2npu",
        DiffusionServerArgs(
            model_path=SANA_WM_MODEL_WEIGHTS_PATH,
+            num_gpus=2,
             tp_size=2,
            extras=EXTRAS_DISABLE_WARMUP,
        ),
