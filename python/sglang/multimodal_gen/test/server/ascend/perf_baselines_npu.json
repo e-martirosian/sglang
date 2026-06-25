@@ -517,6 +517,20 @@
             "expected_e2e_ms": 1317.11,
             "expected_avg_denoise_ms": 35.7,
             "expected_median_denoise_ms": 35.34
-         }
+         },
+        "cosmos3_nano_t2i_npu": {
+            "stages_ms": {
+                "Cosmos3ImagePreprocessStage": 0.01,
+                "Cosmos3TokenizationStage": 1237.98,
+                "Cosmos3LatentPreparationStage": 0.38,
+                "Cosmos3TimestepPreparationStage": 0.79,
+                "Cosmos3DenoisingStage": 3218.75,
+                "Cosmos3DecodingStage": 10.81
+            },
+            "denoise_step_ms": {},
+            "expected_e2e_ms": 4475.63,
+            "expected_avg_denoise_ms": 0.0,
+            "expected_median_denoise_ms": 0.0
+        }
     }
 }

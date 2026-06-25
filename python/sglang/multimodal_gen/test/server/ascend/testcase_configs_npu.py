@@ -50,7 +50,7 @@ EXTRAS_DISABLE_WARMUP = ["--warmup-mode", "request"]
 ONE_NPU_CASES: list[DiffusionTestCase] = [
     # # === Text to Image (T2I) ===
     DiffusionTestCase(
-        "cosmos3_nano_t2i",
+        "cosmos3_nano_t2i_npu",
         DiffusionServerArgs(
             model_path="/root/.cache/modelscope/hub/models/nv-community/Cosmos3-Nano",
             modality="image",
@@ -175,7 +175,7 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
     #     ),
     # ),
     DiffusionTestCase(
-        "ltx_2_3_two_stage_t2v",
+        "ltx_2_3_two_stage_t2v_npu",
         DiffusionServerArgs(
             model_path="/root/.cache/modelscope/hub/models/Lightricks/LTX-2.3",
             num_gpus=2,
@@ -185,6 +185,7 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
         T2V_sampling_params,
     ),
     # === Text and Image to Video (TI2V)
+    # TODO: fix
     # DiffusionTestCase(
     #    "sana_wm_bidirectional_ti2v_2npu",
     #    DiffusionServerArgs(
