@@ -25,6 +25,7 @@ HUNYUAN_3D_2_WEIGHTS_PATH = use_modelscope("Tencent-Hunyuan/Hunyuan3D-2")
 JOYAI_IMAGE_EDIT_WEIGHTS_PATH = use_modelscope(
     "jd-opensource/JoyAI-Image-Edit-Diffusers"
 )
+LTX_2_3_WEIGHTS_PATH = use_modelscope("Lightricks/LTX-2.3")
 MOVA_360_WEIGHTS_PATH = use_modelscope("openmoss/MOVA-360p")
 QWEN_IMAGE_WEIGHTS_PATH = use_modelscope("Qwen/Qwen-Image")
 SANA_WM_MODEL_WEIGHTS_PATH = use_modelscope(
@@ -188,7 +189,7 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
     # DiffusionTestCase(
     #     "ltx_2_3_two_stage_ti2v_2npu",
     #     DiffusionServerArgs(
-    #         model_path="/root/.cache/modelscope/hub/models/Lightricks/LTX-2.3",
+    #         model_path=LTX_2_3_WEIGHTS_PATH,
     #         cfg_parallel=True,
     #         extras=[
     #             "--pipeline-class-name LTX2TwoStagePipeline --ltx2-two-stage-device-mode original",
@@ -201,7 +202,7 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
     # DiffusionTestCase(
     #    "sana_wm_bidirectional_ti2v_2npu",
     #    DiffusionServerArgs(
-    #        model_path="/root/.cache/modelscope/hub/modelsEfficient-Large-Model/SANA-WM_bidirectional",
+    #        model_path=SANA_WM_MODEL_WEIGHTS_PATH,
     #        num_gpus=2,
     #        tp_size=2,
     #        extras=EXTRAS_DISABLE_WARMUP,
