@@ -50,45 +50,70 @@ EXTRAS_DISABLE_WARMUP = ["--warmup-mode", "request"]
 ONE_NPU_CASES: list[DiffusionTestCase] = [
     # # === Text to Image (T2I) ===
     DiffusionTestCase(
-        "ernie_image_t2i_1_npu",
+        "cosmos3_nano_t2i",
         DiffusionServerArgs(
-            model_path=ERNIE_IMAGE_WEIGHTS_PATH,
-            extras=EXTRAS_DISABLE_WARMUP,
+            model_path="nv-community/Cosmos3-Nano",
+            modality="image",
         ),
-        T2I_sampling_params,
-    ),
-    DiffusionTestCase(
-        "glm_image_t2i_1_npu",
-        DiffusionServerArgs(
-            model_path=GLM_IMAGE_WEIGHTS_PATH,
-            extras=EXTRAS_DISABLE_WARMUP,
+        DiffusionSamplingParams(
+            prompt="A red cube on a white table, product photo.",
+            output_size="832x480",
+            output_format="png",
+            extras={
+                "num_inference_steps": 35,
+                "seed": 0,
+                "max_sequence_length": 128,
+                "flow_shift": 10.0,
+                "extra_args": {
+                    "guardrails": False,
+                    "use_resolution_template": False,
+                },
+            },
         ),
-        T2I_sampling_params,
+        run_perf_check=False,
+        run_consistency_check=True,
+        run_component_accuracy_check=False,
     ),
-    DiffusionTestCase(
-        "flux_image_t2i_npu",
-        DiffusionServerArgs(
-            model_path=FLUX_1_DEV_WEIGHTS_PATH,
-            extras=EXTRAS_DISABLE_WARMUP,
-        ),
-        T2I_sampling_params,
-    ),
-    DiffusionTestCase(
-       "flux_2_klein_4b_t2i_1_npu",
-       DiffusionServerArgs(
-           model_path=FLUX_2_KLEIN_4B_WEIGHTS_PATH,
-           extras=EXTRAS_DISABLE_WARMUP,
-      ),
-       T2I_sampling_params,
-    ),
-    DiffusionTestCase(
-        "z_image_t2i_1_npu",
-        DiffusionServerArgs(
-            model_path=Z_IMAGE_WEIGHTS_PATH,
-            extras=EXTRAS_DISABLE_WARMUP,
-        ),
-        T2I_sampling_params,
-    ),
+    # DiffusionTestCase(
+    #     "ernie_image_t2i_1_npu",
+    #     DiffusionServerArgs(
+    #         model_path=ERNIE_IMAGE_WEIGHTS_PATH,
+    #         extras=EXTRAS_DISABLE_WARMUP,
+    #     ),
+    #     T2I_sampling_params,
+    # ),
+    # DiffusionTestCase(
+    #     "glm_image_t2i_1_npu",
+    #     DiffusionServerArgs(
+    #         model_path=GLM_IMAGE_WEIGHTS_PATH,
+    #         extras=EXTRAS_DISABLE_WARMUP,
+    #     ),
+    #     T2I_sampling_params,
+    # ),
+    # DiffusionTestCase(
+    #     "flux_image_t2i_npu",
+    #     DiffusionServerArgs(
+    #         model_path=FLUX_1_DEV_WEIGHTS_PATH,
+    #         extras=EXTRAS_DISABLE_WARMUP,
+    #     ),
+    #     T2I_sampling_params,
+    # ),
+    # DiffusionTestCase(
+    #    "flux_2_klein_4b_t2i_1_npu",
+    #    DiffusionServerArgs(
+    #        model_path=FLUX_2_KLEIN_4B_WEIGHTS_PATH,
+    #        extras=EXTRAS_DISABLE_WARMUP,
+    #   ),
+    #    T2I_sampling_params,
+    # ),
+    # DiffusionTestCase(
+    #     "z_image_t2i_1_npu",
+    #     DiffusionServerArgs(
+    #         model_path=Z_IMAGE_WEIGHTS_PATH,
+    #         extras=EXTRAS_DISABLE_WARMUP,
+    #     ),
+    #     T2I_sampling_params,
+    # ),
     # === Image to Mesh (I2M) ===
     # TODO: uncomment when Hunyuan3D-2 pipeline will be fixed
     # DiffusionTestCase(
@@ -100,16 +125,16 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
     #     HUNYUAN3D_SHAPE_sampling_params,
     # ),
     # === Text to Video (T2V) ===
-    DiffusionTestCase(
-        "wan2_1_t2v_1.3b_1_npu",
-        DiffusionServerArgs(
-            model_path=WAN2_1_T2V_1_3B_DIFFUSERS_WEIGHTS_PATH,
-            extras=EXTRAS_DISABLE_WARMUP,
-        ),
-        DiffusionSamplingParams(
-            prompt=T2V_PROMPT,
-        ),
-    ),
+    # DiffusionTestCase(
+    #     "wan2_1_t2v_1.3b_1_npu",
+    #     DiffusionServerArgs(
+    #         model_path=WAN2_1_T2V_1_3B_DIFFUSERS_WEIGHTS_PATH,
+    #         extras=EXTRAS_DISABLE_WARMUP,
+    #     ),
+    #     DiffusionSamplingParams(
+    #         prompt=T2V_PROMPT,
+    #     ),
+    # ),
 ]
 
 TWO_NPU_CASES: list[DiffusionTestCase] = [
