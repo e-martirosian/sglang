@@ -17,16 +17,19 @@ def use_modelscope(name: str):
 
 COSMOS3_NANO_WEIGHTS_PATH = use_modelscope("nv-community/Cosmos3-Nano")
 ERNIE_IMAGE_WEIGHTS_PATH = use_modelscope("PaddlePaddle/ERNIE-Image")
+FLUX_1_DEV_WEIGHTS_PATH = use_modelscope("black-forest-labs/FLUX.1-dev")
+FLUX_2_DEV_WEIGHTS_PATH = use_modelscope("black-forest-labs/FLUX.2-dev")
+FLUX_2_KLEIN_4B_WEIGHTS_PATH = use_modelscope("black-forest-labs/FLUX.2-klein-4B")
 GLM_IMAGE_WEIGHTS_PATH = use_modelscope("ZhipuAI/GLM-Image")
 HUNYUAN_3D_2_WEIGHTS_PATH = use_modelscope("Tencent-Hunyuan/Hunyuan3D-2")
 JOYAI_IMAGE_EDIT_WEIGHTS_PATH = use_modelscope(
     "jd-opensource/JoyAI-Image-Edit-Diffusers"
 )
 MOVA_360_WEIGHTS_PATH = use_modelscope("openmoss/MOVA-360p")
-FLUX_1_DEV_WEIGHTS_PATH = use_modelscope("black-forest-labs/FLUX.1-dev")
-FLUX_2_DEV_WEIGHTS_PATH = use_modelscope("black-forest-labs/FLUX.2-dev")
-FLUX_2_KLEIN_4B_WEIGHTS_PATH = use_modelscope("black-forest-labs/FLUX.2-klein-4B")
 QWEN_IMAGE_WEIGHTS_PATH = use_modelscope("Qwen/Qwen-Image")
+SANA_WM_MODEL_WEIGHTS_PATH = use_modelscope(
+    "Efficient-Large-Model/SANA-WM_bidirectional"
+)
 WAN2_1_T2V_1_3B_DIFFUSERS_WEIGHTS_PATH = use_modelscope(
     "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
 )
@@ -34,9 +37,6 @@ WAN2_2_T2V_A14B_DIFFUSERS_W8A8_WEIGHTS_PATH = use_modelscope(
     "Eco-Tech/Wan2.2-T2V-A14B-Diffusers-w8a8"
 )
 Z_IMAGE_WEIGHTS_PATH = use_modelscope("Tongyi-MAI/Z-Image")
-SANA_WM_MODEL_WEIGHTS_PATH = use_modelscope(
-    "Efficient-Large-Model/SANA-WM_bidirectional"
-)
 
 EXTRAS_DISABLE_WARMUP = ["--warmup-mode", "request"]
 
