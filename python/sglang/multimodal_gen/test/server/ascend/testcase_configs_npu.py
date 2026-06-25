@@ -6,9 +6,6 @@ from sglang.multimodal_gen.test.server.testcase_configs import (
     DiffusionServerArgs,
     DiffusionTestCase,
     T2I_sampling_params,
-    T2V_sampling_params,
-    SANA_WM_TI2V_CI_sampling_params,
-    IDEOGRAM4_CI_sampling_params
 )
 
 MODELSCOPE_MODEL_WEIGHTS_DIR = "/root/.cache/modelscope/hub/models/"
@@ -40,6 +37,7 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
         DiffusionServerArgs(
             model_path=COSMOS3_NANO_WEIGHTS_PATH,
             modality="image",
+            extras=EXTRAS_DISABLE_WARMUP,
         ),
         DiffusionSamplingParams(
             prompt="A red cube on a white table, product photo.",
@@ -131,6 +129,7 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
         "joyai_image_edit_ti2i_npu",
         DiffusionServerArgs(
             model_path=JOYAI_IMAGE_EDIT_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
         ),
         run_consistency_check=False,
         run_component_accuracy_check=False,
@@ -144,6 +143,7 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
         DiffusionServerArgs(
             model_path=FLUX_2_DEV_WEIGHTS_PATH,
             num_gpus=2,
+            tp_size=2,
             extras=EXTRAS_DISABLE_WARMUP,
         ),
         T2I_sampling_params,
@@ -209,6 +209,7 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
             num_gpus=2,
             tp_size=2,
             dit_layerwise_offload=True,
+            extras=EXTRAS_DISABLE_WARMUP,
         ),
         run_perf_check=False,
         run_consistency_check=False,
