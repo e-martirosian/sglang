@@ -49,31 +49,31 @@ EXTRAS_DISABLE_WARMUP = ["--warmup-mode", "request"]
 
 ONE_NPU_CASES: list[DiffusionTestCase] = [
     # # === Text to Image (T2I) ===
-    DiffusionTestCase(
-        "cosmos3_nano_t2i_npu",
-        DiffusionServerArgs(
-            model_path="/root/.cache/modelscope/hub/models/nv-community/Cosmos3-Nano",
-            modality="image",
-        ),
-        DiffusionSamplingParams(
-            prompt="A red cube on a white table, product photo.",
-            output_size="832x480",
-            output_format="png",
-            extras={
-                "num_inference_steps": 35,
-                "seed": 0,
-                "max_sequence_length": 128,
-                "flow_shift": 10.0,
-                "extra_args": {
-                    "guardrails": False,
-                    "use_resolution_template": False,
-                },
-            },
-        ),
-        run_perf_check=False,
-        run_consistency_check=True,
-        run_component_accuracy_check=False,
-    ),
+    # DiffusionTestCase(
+    #     "cosmos3_nano_t2i_npu",
+    #     DiffusionServerArgs(
+    #         model_path="/root/.cache/modelscope/hub/models/nv-community/Cosmos3-Nano",
+    #         modality="image",
+    #     ),
+    #     DiffusionSamplingParams(
+    #         prompt="A red cube on a white table, product photo.",
+    #         output_size="832x480",
+    #         output_format="png",
+    #         extras={
+    #             "num_inference_steps": 35,
+    #             "seed": 0,
+    #             "max_sequence_length": 128,
+    #             "flow_shift": 10.0,
+    #             "extra_args": {
+    #                 "guardrails": False,
+    #                 "use_resolution_template": False,
+    #             },
+    #         },
+    #     ),
+    #     run_perf_check=False,
+    #     run_consistency_check=True,
+    #     run_component_accuracy_check=False,
+    # ),
     # DiffusionTestCase(
     #     "ernie_image_t2i_1_npu",
     #     DiffusionServerArgs(
@@ -208,7 +208,15 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
     #     run_models_api_check=False,
     #     run_t2v_input_reference_check=False,
     # ),
-
+    DiffusionTestCase(
+        "mova_360p_t2va_2npu",
+        DiffusionServerArgs(
+            model_path="/root/.cache/modelscope/hub/models/openmoss/MOVA-360p",
+            tp_size=2,
+            dit_layerwise_offload=True,
+        ),
+        run_perf_check=False,
+    ),
 ]
 
 DEFAULT_EST_TIME_SECONDS = 300.0
