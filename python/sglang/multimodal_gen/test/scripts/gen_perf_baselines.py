@@ -24,7 +24,7 @@ from sglang.multimodal_gen.test.test_utils import (
 
 def _all_cases() -> list[DiffusionTestCase]:
     import sglang.multimodal_gen.test.server.testcase_configs as cfg
-    
+
     cases: list[DiffusionTestCase] = []
     for _, v in inspect.getmembers(cfg):
         if isinstance(v, list) and v and isinstance(v[0], DiffusionTestCase):

@@ -6,8 +6,9 @@ from sglang.multimodal_gen.test.server.testcase_configs import (
     DiffusionServerArgs,
     DiffusionTestCase,
     T2I_sampling_params,
+    T2V_sampling_params,
     SANA_WM_TI2V_CI_sampling_params,
-    HUNYUAN3D_SHAPE_sampling_params,
+    IDEOGRAM4_CI_sampling_params
 )
 
 MODEL_WEIGHTS_DIR = "/root/.cache/modelscope/hub/models/"
@@ -20,9 +21,6 @@ GLM_IMAGE_WEIGHTS_PATH = os.path.join(
 )
 HUNYUAN_3D_2_WEIGHTS_PATH = os.path.join(
     MODEL_WEIGHTS_DIR, "Tencent-Hunyuan/Hunyuan3D-2"
-)
-HUNYUAN_VIDEO_WEIGHTS_PATH = os.path.join(
-    MODEL_WEIGHTS_DIR, "AI-ModelScope/HunyuanVideo"
 )
 FLUX_1_DEV_WEIGHTS_PATH = os.path.join(
     MODEL_WEIGHTS_DIR, "black-forest-labs/FLUX.1-dev"
@@ -51,46 +49,46 @@ EXTRAS_DISABLE_WARMUP = ["--warmup-mode", "request"]
 
 ONE_NPU_CASES: list[DiffusionTestCase] = [
     # # === Text to Image (T2I) ===
-    # DiffusionTestCase(
-    #     "ernie_image_t2i_1_npu",
-    #     DiffusionServerArgs(
-    #         model_path=ERNIE_IMAGE_WEIGHTS_PATH,
-    #         extras=EXTRAS_DISABLE_WARMUP,
-    #     ),
-    #     T2I_sampling_params,
-    # ),
-    # DiffusionTestCase(
-    #     "glm_image_t2i_1_npu",
-    #     DiffusionServerArgs(
-    #         model_path=GLM_IMAGE_WEIGHTS_PATH,
-    #         extras=EXTRAS_DISABLE_WARMUP,
-    #     ),
-    #     T2I_sampling_params,
-    # ),
-    # DiffusionTestCase(
-    #     "flux_image_t2i_npu",
-    #     DiffusionServerArgs(
-    #         model_path=FLUX_1_DEV_WEIGHTS_PATH,
-    #         extras=EXTRAS_DISABLE_WARMUP,
-    #     ),
-    #     T2I_sampling_params,
-    # ),
-    # DiffusionTestCase(
-    #    "flux_2_klein_4b_t2i_1_npu",
-    #    DiffusionServerArgs(
-    #        model_path=FLUX_2_KLEIN_4B_WEIGHTS_PATH,
-    #        extras=EXTRAS_DISABLE_WARMUP,
-    #   ),
-    #    T2I_sampling_params,
-    # ),
-    # DiffusionTestCase(
-    #     "z_image_t2i_1_npu",
-    #     DiffusionServerArgs(
-    #         model_path=Z_IMAGE_WEIGHTS_PATH,
-    #         extras=EXTRAS_DISABLE_WARMUP,
-    #     ),
-    #     T2I_sampling_params,
-    # ),
+    DiffusionTestCase(
+        "ernie_image_t2i_1_npu",
+        DiffusionServerArgs(
+            model_path=ERNIE_IMAGE_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        T2I_sampling_params,
+    ),
+    DiffusionTestCase(
+        "glm_image_t2i_1_npu",
+        DiffusionServerArgs(
+            model_path=GLM_IMAGE_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        T2I_sampling_params,
+    ),
+    DiffusionTestCase(
+        "flux_image_t2i_npu",
+        DiffusionServerArgs(
+            model_path=FLUX_1_DEV_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        T2I_sampling_params,
+    ),
+    DiffusionTestCase(
+       "flux_2_klein_4b_t2i_1_npu",
+       DiffusionServerArgs(
+           model_path=FLUX_2_KLEIN_4B_WEIGHTS_PATH,
+           extras=EXTRAS_DISABLE_WARMUP,
+      ),
+       T2I_sampling_params,
+    ),
+    DiffusionTestCase(
+        "z_image_t2i_1_npu",
+        DiffusionServerArgs(
+            model_path=Z_IMAGE_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        T2I_sampling_params,
+    ),
     # === Image to Mesh (I2M) ===
     # TODO: uncomment when Hunyuan3D-2 pipeline will be fixed
     # DiffusionTestCase(
@@ -103,28 +101,21 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
     # ),
     # === Text to Video (T2V) ===
     DiffusionTestCase(
-        "hunyuan_video_t2v_1_npu",
+        "wan2_1_t2v_1.3b_1_npu",
         DiffusionServerArgs(
-            model_path=HUNYUAN_VIDEO_WEIGHTS_PATH,
+            model_path=WAN2_1_T2V_1_3B_DIFFUSERS_WEIGHTS_PATH,
             extras=EXTRAS_DISABLE_WARMUP,
         ),
+        DiffusionSamplingParams(
+            prompt=T2V_PROMPT,
+        ),
     ),
-    # DiffusionTestCase(
-    #     "wan2_1_t2v_1.3b_1_npu",
-    #     DiffusionServerArgs(
-    #         model_path=WAN2_1_T2V_1_3B_DIFFUSERS_WEIGHTS_PATH,
-    #         extras=EXTRAS_DISABLE_WARMUP,
-    #     ),
-    #     DiffusionSamplingParams(
-    #         prompt=T2V_PROMPT,
-    #     ),
-    # ),
 ]
 
 TWO_NPU_CASES: list[DiffusionTestCase] = [
-    # === Text to Image (T2I) ===
+    # # === Text to Image (T2I) ===
     # DiffusionTestCase(
-    #     "flux_2_dev_t2i_2npu",
+    #     "flux_2_image_t2i_2npu",
     #     DiffusionServerArgs(
     #         model_path=FLUX_2_DEV_WEIGHTS_PATH,
     #         num_gpus=2,
@@ -144,21 +135,7 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
     #     ),
     #     T2I_sampling_params,
     # ),
-    # === Text to Video (T2V) ===
-    DiffusionTestCase(
-       "sana_wm_bidirectional_t2v_2npu",
-       DiffusionServerArgs(
-           model_path=SANA_WM_MODEL_WEIGHTS_PATH,
-            num_gpus=2,
-            tp_size=2,
-           extras=EXTRAS_DISABLE_WARMUP,
-       ),
-        SANA_WM_TI2V_CI_sampling_params,
-        run_perf_check=False,
-        run_component_accuracy_check=False,
-        run_models_api_check=False,
-        run_t2v_input_reference_check=False,
-    ),
+    # # === Text to Video (T2V) ===
     # DiffusionTestCase(
     #     "wan2_2_t2v_14b_w8a8_2npu",
     #     DiffusionServerArgs(
@@ -172,6 +149,31 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
     #         prompt=T2V_PROMPT,
     #     ),
     # ),
+    DiffusionTestCase(
+        "ltx_2_3_two_stage_t2v",
+        DiffusionServerArgs(
+            model_path="Lightricks/LTX-2.3",
+            cfg_parallel=True,
+            extras=["--pipeline-class-name LTX2TwoStagePipeline"],
+        ),
+        T2V_sampling_params,
+    ),
+    # === Text and Image to Video (TI2V)
+    # DiffusionTestCase(
+    #    "sana_wm_bidirectional_ti2v_2npu",
+    #    DiffusionServerArgs(
+    #        model_path=SANA_WM_MODEL_WEIGHTS_PATH,
+    #         num_gpus=2,
+    #         tp_size=2,
+    #        extras=EXTRAS_DISABLE_WARMUP,
+    #    ),
+    #     SANA_WM_TI2V_CI_sampling_params,
+    #     run_perf_check=False,
+    #     run_component_accuracy_check=False,
+    #     run_models_api_check=False,
+    #     run_t2v_input_reference_check=False,
+    # ),
+
 ]
 
 DEFAULT_EST_TIME_SECONDS = 300.0
