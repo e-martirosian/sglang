@@ -52,7 +52,7 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
     DiffusionTestCase(
         "cosmos3_nano_t2i",
         DiffusionServerArgs(
-            model_path="nv-community/Cosmos3-Nano",
+            model_path="/root/.cache/modelscope/hub/models/nv-community/Cosmos3-Nano",
             modality="image",
         ),
         DiffusionSamplingParams(
@@ -177,7 +177,7 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
     DiffusionTestCase(
         "ltx_2_3_two_stage_t2v",
         DiffusionServerArgs(
-            model_path="Lightricks/LTX-2.3",
+            model_path="/root/.cache/modelscope/hub/models/Lightricks/LTX-2.3",
             num_gpus=2,
             cfg_parallel=True,
             extras=["--pipeline-class-name LTX2TwoStagePipeline"],
