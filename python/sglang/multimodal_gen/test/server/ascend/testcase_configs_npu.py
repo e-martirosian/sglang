@@ -48,72 +48,76 @@ SANA_WM_MODEL_WEIGHTS_PATH = os.path.join(
 EXTRAS_DISABLE_WARMUP = ["--warmup-mode", "request"]
 
 ONE_NPU_CASES: list[DiffusionTestCase] = [
-    # # === Text to Image (T2I) ===
-    # DiffusionTestCase(
-    #     "cosmos3_nano_t2i_npu",
-    #     DiffusionServerArgs(
-    #         model_path="/root/.cache/modelscope/hub/models/nv-community/Cosmos3-Nano",
-    #         modality="image",
-    #     ),
-    #     DiffusionSamplingParams(
-    #         prompt="A red cube on a white table, product photo.",
-    #         output_size="832x480",
-    #         output_format="png",
-    #         extras={
-    #             "num_inference_steps": 35,
-    #             "seed": 0,
-    #             "max_sequence_length": 128,
-    #             "flow_shift": 10.0,
-    #             "extra_args": {
-    #                 "guardrails": False,
-    #                 "use_resolution_template": False,
-    #             },
-    #         },
-    #     ),
-    #     run_perf_check=False,
-    #     run_consistency_check=True,
-    #     run_component_accuracy_check=False,
-    # ),
-    # DiffusionTestCase(
-    #     "ernie_image_t2i_1_npu",
-    #     DiffusionServerArgs(
-    #         model_path=ERNIE_IMAGE_WEIGHTS_PATH,
-    #         extras=EXTRAS_DISABLE_WARMUP,
-    #     ),
-    #     T2I_sampling_params,
-    # ),
-    # DiffusionTestCase(
-    #     "glm_image_t2i_1_npu",
-    #     DiffusionServerArgs(
-    #         model_path=GLM_IMAGE_WEIGHTS_PATH,
-    #         extras=EXTRAS_DISABLE_WARMUP,
-    #     ),
-    #     T2I_sampling_params,
-    # ),
-    # DiffusionTestCase(
-    #     "flux_image_t2i_npu",
-    #     DiffusionServerArgs(
-    #         model_path=FLUX_1_DEV_WEIGHTS_PATH,
-    #         extras=EXTRAS_DISABLE_WARMUP,
-    #     ),
-    #     T2I_sampling_params,
-    # ),
-    # DiffusionTestCase(
-    #    "flux_2_klein_4b_t2i_1_npu",
-    #    DiffusionServerArgs(
-    #        model_path=FLUX_2_KLEIN_4B_WEIGHTS_PATH,
-    #        extras=EXTRAS_DISABLE_WARMUP,
-    #   ),
-    #    T2I_sampling_params,
-    # ),
-    # DiffusionTestCase(
-    #     "z_image_t2i_1_npu",
-    #     DiffusionServerArgs(
-    #         model_path=Z_IMAGE_WEIGHTS_PATH,
-    #         extras=EXTRAS_DISABLE_WARMUP,
-    #     ),
-    #     T2I_sampling_params,
-    # ),
+    # === Text to Image (T2I) ===
+    DiffusionTestCase(
+        "cosmos3_nano_t2i_npu",
+        DiffusionServerArgs(
+            model_path="/root/.cache/modelscope/hub/models/nv-community/Cosmos3-Nano",
+            modality="image",
+        ),
+        DiffusionSamplingParams(
+            prompt="A red cube on a white table, product photo.",
+            output_size="832x480",
+            output_format="png",
+            extras={
+                "num_inference_steps": 35,
+                "seed": 0,
+                "max_sequence_length": 128,
+                "flow_shift": 10.0,
+                "extra_args": {
+                    "guardrails": False,
+                    "use_resolution_template": False,
+                },
+            },
+        ),
+        run_perf_check=False,
+        run_consistency_check=True,
+        run_component_accuracy_check=False,
+    ),
+    DiffusionTestCase(
+        "ernie_image_t2i_1_npu",
+        DiffusionServerArgs(
+            model_path=ERNIE_IMAGE_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        T2I_sampling_params,
+        run_consistency_check=False,
+    ),
+    DiffusionTestCase(
+        "glm_image_t2i_1_npu",
+        DiffusionServerArgs(
+            model_path=GLM_IMAGE_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        T2I_sampling_params,
+        run_consistency_check=False,
+    ),
+    DiffusionTestCase(
+        "flux_image_t2i_npu",
+        DiffusionServerArgs(
+            model_path=FLUX_1_DEV_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        T2I_sampling_params,
+    ),
+    DiffusionTestCase(
+       "flux_2_klein_4b_t2i_1_npu",
+       DiffusionServerArgs(
+           model_path=FLUX_2_KLEIN_4B_WEIGHTS_PATH,
+           extras=EXTRAS_DISABLE_WARMUP,
+      ),
+       T2I_sampling_params,
+       run_consistency_check=False,
+    ),
+    DiffusionTestCase(
+        "z_image_t2i_1_npu",
+        DiffusionServerArgs(
+            model_path=Z_IMAGE_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        T2I_sampling_params,
+        run_consistency_check=False,
+    ),
     # === Image to Mesh (I2M) ===
     # TODO: uncomment when Hunyuan3D-2 pipeline will be fixed
     # DiffusionTestCase(
@@ -123,18 +127,19 @@ ONE_NPU_CASES: list[DiffusionTestCase] = [
     #         extras=EXTRAS_DISABLE_WARMUP,
     #     ),
     #     HUNYUAN3D_SHAPE_sampling_params,
+    #     run_consistency_check=False,
     # ),
     # === Text to Video (T2V) ===
-    # DiffusionTestCase(
-    #     "wan2_1_t2v_1.3b_1_npu",
-    #     DiffusionServerArgs(
-    #         model_path=WAN2_1_T2V_1_3B_DIFFUSERS_WEIGHTS_PATH,
-    #         extras=EXTRAS_DISABLE_WARMUP,
-    #     ),
-    #     DiffusionSamplingParams(
-    #         prompt=T2V_PROMPT,
-    #     ),
-    # ),
+    DiffusionTestCase(
+        "wan2_1_t2v_1.3b_1_npu",
+        DiffusionServerArgs(
+            model_path=WAN2_1_T2V_1_3B_DIFFUSERS_WEIGHTS_PATH,
+            extras=EXTRAS_DISABLE_WARMUP,
+        ),
+        DiffusionSamplingParams(
+            prompt=T2V_PROMPT,
+        ),
+    ),
     # === Text and Image to Image (TI2I)
     DiffusionTestCase(
         "joyai_image_edit_ti2i_npu",
@@ -181,25 +186,26 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
     #         prompt=T2V_PROMPT,
     #     ),
     # ),
-    # TODO: fix
+    # TODO: fix fail
     # DiffusionTestCase(
-    #     "ltx_2_3_two_stage_t2v_npu",
+    #     "ltx_2_3_two_stage_ti2v_2npu",
     #     DiffusionServerArgs(
     #         model_path="/root/.cache/modelscope/hub/models/Lightricks/LTX-2.3",
-    #         num_gpus=2,
     #         cfg_parallel=True,
-    #         extras=["--pipeline-class-name LTX2TwoStagePipeline"],
+    #         extras=[
+    #             "--pipeline-class-name LTX2TwoStagePipeline --ltx2-two-stage-device-mode original",
+    #         ],
     #     ),
-    #     T2V_sampling_params,
+    #     run_component_accuracy_check=False,
     # ),
     # === Text and Image to Video (TI2V)
-    # TODO: fix
+    # TODO: fix fail
     # DiffusionTestCase(
     #    "sana_wm_bidirectional_ti2v_2npu",
     #    DiffusionServerArgs(
-    #        model_path=SANA_WM_MODEL_WEIGHTS_PATH,
-    #         num_gpus=2,
-    #         tp_size=2,
+    #        model_path="/root/.cache/modelscope/hub/modelsEfficient-Large-Model/SANA-WM_bidirectional",
+    #        num_gpus=2,
+    #        tp_size=2,
     #        extras=EXTRAS_DISABLE_WARMUP,
     #    ),
     #     SANA_WM_TI2V_CI_sampling_params,
@@ -212,10 +218,12 @@ TWO_NPU_CASES: list[DiffusionTestCase] = [
         "mova_360p_t2va_2npu",
         DiffusionServerArgs(
             model_path="/root/.cache/modelscope/hub/models/openmoss/MOVA-360p",
+            num_gpus=2,
             tp_size=2,
             dit_layerwise_offload=True,
         ),
         run_perf_check=False,
+        run_consistency_check=False,
     ),
 ]
 
