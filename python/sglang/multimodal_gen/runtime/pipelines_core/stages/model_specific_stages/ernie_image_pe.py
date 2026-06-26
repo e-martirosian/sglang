@@ -71,6 +71,7 @@ class PromptEnhancementStage(PipelineStage):
         max_new_tokens: int,
         temperature: float = None,
         top_p: float = None,
+        pe_model_url: str = None,
     ) -> str:
         user_content = json.dumps(
             {"prompt": prompt, "width": width, "height": height},

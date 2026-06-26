@@ -190,8 +190,10 @@ class ErnieImagePipeline(LoRAPipeline, ComposedPipelineBase):
         self.add_stage(InputValidationStage())
 
         pe_model = self.get_module("pe")
+        logger.info(pe_model)
         if pe_model is not None:
             pe_tokenizer = getattr(pe_model, "pe_tokenizer", None)
+            logger.info(pe_tokenizer)
             if pe_tokenizer is None:
                 from transformers import AutoTokenizer
 

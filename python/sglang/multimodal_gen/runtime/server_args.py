@@ -348,6 +348,9 @@ class ServerArgs(DisaggServerArgsMixin):
     enable_trace: bool = False
     otlp_traces_endpoint: str = "localhost:4317"
 
+    # SGLang backend for PE stage
+    pe_model_url: str | None = None
+
     @property
     def broker_port(self) -> int:
         return self.port + 1
@@ -1629,6 +1632,13 @@ class ServerArgs(DisaggServerArgsMixin):
             default=ServerArgs.backend.value,
             help="The model backend to use. 'auto' prefers sglang native and falls back to diffusers. "
             "'sglang' uses native optimized implementation. 'diffusers' uses vanilla diffusers pipeline.",
+        )
+        # SGLang backend for PE stage
+        parser.add_argument(
+            "--pe-model-url",
+            type=str,
+            default=ServerArgs.pe_model_url,
+            help="Url of SGLang server for PE stage",
         )
         return parser
 

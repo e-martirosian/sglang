@@ -3,6 +3,7 @@ import json
 import os
 
 import torch
+import requests
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
@@ -78,6 +79,25 @@ class PEModelWrapper:
                 self.device = torch.device(device)
         return self
 
+class PESGLangModelWrapper:
+
+    def __init__(self, model_url):
+        self.model_url = model_url
+        self.pe_tokenizer = True
+
+    def generate(self, prompt: str, sampling_params: dict) -> dict:
+        response = requests.post(
+            self.model_url + "/generate", json={"prompt": prompt, "sampling_params": sampling_params}
+        )
+        data = response.json()
+        logger.info(data)
+        text = data.get("text")
+        return {"text": text}
+
+    def to(self, *args, **kwargs):
+        """Move underlying model to device."""
+        logger.warning("SGLang backend is used, can't move model to device.")
+        return self
 
 class PELoader(ComponentLoader):
     """Loader for prompt-enhancement causal LM (Ministral-3 based)."""
@@ -88,6 +108,12 @@ class PELoader(ComponentLoader):
     def load_customized(
         self, component_model_path: str, server_args: ServerArgs, component_name: str
     ):
+        if server_args.srt_encoder_url is not None:
+            logger.info(
+                f"Use {server_args.pe_model_url} for PE"
+            )
+            return PESGLangModelWrapper(server_args.pe_model_url)
+
         logger.info("Loading PE model from %s ...", component_model_path)
 
         pe_tokenizer_dir = os.path.join(
