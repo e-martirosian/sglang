@@ -108,7 +108,7 @@ class PELoader(ComponentLoader):
     def load_customized(
         self, component_model_path: str, server_args: ServerArgs, component_name: str
     ):
-        if server_args.srt_encoder_url is not None:
+        if server_args.pe_model_url is not None:
             logger.info(
                 f"Use {server_args.pe_model_url} for PE"
             )
