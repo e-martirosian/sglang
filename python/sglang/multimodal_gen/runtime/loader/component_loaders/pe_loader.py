@@ -85,7 +85,7 @@ class SGLangTokenizerWrapper:
         self.model_url = model_url
     def apply_chat_template(self, messages, tokenize, add_generation_prompt):
         response = requests.post(
-            self.model_url + "/chat/completions", json={"messages": messages, "tokenize": tokenize, "add_generation_prompt": add_generation_prompt}
+            self.model_url + "/chat/completions", json={"text": messages, "tokenize": tokenize, "add_generation_prompt": add_generation_prompt}
         )
         data = response.json()
         logger.info(data)
