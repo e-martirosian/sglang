@@ -96,6 +96,6 @@ class PromptEnhancementStage(PipelineStage):
             sampling_params=sampling_params,
         )
 
-        logger.info(f"Output of pe_model generate {output["text"].strip()}")
+        logger.info(f"Output of pe_model generate {output['text'].strip()}")
 
         return output["text"].strip()
