@@ -107,7 +107,7 @@ class PESGLangModelWrapper:
         #     self.model_url + "/chat/completions", json={"text": prompt, "sampling_params": sampling_params}
         # )
         data = response.json()
-        # logger.info(data)
+        logger.info(data)
         text = data.get("text")
         return {"text": text}
 
