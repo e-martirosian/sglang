@@ -100,12 +100,12 @@ class PESGLangModelWrapper:
         self.pe_tokenizer = None #SGLangTokenizerWrapper(model_url)
 
     def generate(self, prompt: str, sampling_params: dict) -> dict:
-        # response = requests.post(
-        #     self.model_url + "/generate", json={"text": prompt, "sampling_params": sampling_params}
-        # )
         response = requests.post(
-            self.model_url + "/chat/completions", json={"text": prompt, "sampling_params": sampling_params}
+            self.model_url + "/generate", json={"prompt": prompt, "sampling_params": sampling_params}
         )
+        # response = requests.post(
+        #     self.model_url + "/chat/completions", json={"text": prompt, "sampling_params": sampling_params}
+        # )
         data = response.json()
         # logger.info(data)
         text = data.get("text")
