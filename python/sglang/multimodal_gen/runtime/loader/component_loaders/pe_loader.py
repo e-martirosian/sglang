@@ -79,11 +79,25 @@ class PEModelWrapper:
                 self.device = torch.device(device)
         return self
 
+
+class SGLangTokenizerWrapper:
+    def __init__(self, model_url):
+        self.mode_url = model_url
+    def apply_chat_template(self, messages, tokenize, add_generation_prompt):
+        response = requests.post(
+            self.model_url + "/completions", json={"messages": messages, "tokenize": tokenize, "add_generation_prompt": add_generation_prompt}
+        )
+        data = response.json()
+        logger.info(data)
+        text = data.get("text")
+        return {"text": text}
+
+
 class PESGLangModelWrapper:
 
     def __init__(self, model_url):
         self.model_url = model_url
-        self.pe_tokenizer = True
+        self.pe_tokenizer = SGLangTokenizerWrapper(model_url)
 
     def generate(self, prompt: str, sampling_params: dict) -> dict:
         response = requests.post(
@@ -99,6 +113,7 @@ class PESGLangModelWrapper:
         logger.warning("SGLang backend is used, can't move model to device.")
         return self
 
+
 class PELoader(ComponentLoader):
     """Loader for prompt-enhancement causal LM (Ministral-3 based)."""
 
@@ -108,11 +123,11 @@ class PELoader(ComponentLoader):
     def load_customized(
         self, component_model_path: str, server_args: ServerArgs, component_name: str
     ):
-        if server_args.pe_model_url is not None:
+        if server_args.pe_server_url is not None:
             logger.info(
-                f"Use {server_args.pe_model_url} for PE"
+                f"Use {server_args.pe_server_url} server for PE"
             )
-            return PESGLangModelWrapper(server_args.pe_model_url)
+            return PESGLangModelWrapper(server_args.pe_server_url)
 
         logger.info("Loading PE model from %s ...", component_model_path)
 

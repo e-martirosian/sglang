@@ -349,7 +349,7 @@ class ServerArgs(DisaggServerArgsMixin):
     otlp_traces_endpoint: str = "localhost:4317"
 
     # SGLang backend for PE stage
-    pe_model_url: str | None = None
+    pe_server_url: str | None = None
 
     @property
     def broker_port(self) -> int:
@@ -1637,7 +1637,7 @@ class ServerArgs(DisaggServerArgsMixin):
         parser.add_argument(
             "--pe-model-url",
             type=str,
-            default=ServerArgs.pe_model_url,
+            default=ServerArgs.pe_server_url,
             help="Url of SGLang server for PE stage",
         )
         return parser
