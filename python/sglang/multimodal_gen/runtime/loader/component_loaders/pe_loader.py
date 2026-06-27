@@ -80,24 +80,24 @@ class PEModelWrapper:
         return self
 
 
-class SGLangTokenizerWrapper:
-    def __init__(self, model_url):
-        self.model_url = model_url
-    def apply_chat_template(self, messages, tokenize, add_generation_prompt):
-        response = requests.post(
-            self.model_url + "/chat/completions", json={"text": messages, "tokenize": tokenize, "add_generation_prompt": add_generation_prompt}
-        )
-        data = response.json()
-        logger.info(data)
-        text = data.get("text")
-        return {"text": text}
+# class SGLangTokenizerWrapper:
+#     def __init__(self, model_url):
+#         self.model_url = model_url
+#     def apply_chat_template(self, messages, tokenize, add_generation_prompt):
+#         response = requests.post(
+#             self.model_url + "/chat/completions", json={"text": messages, "tokenize": tokenize, "add_generation_prompt": add_generation_prompt}
+#         )
+#         data = response.json()
+#         logger.info(data)
+#         text = data.get("text")
+#         return {"text": text}
 
 
 class PESGLangModelWrapper:
 
     def __init__(self, model_url):
         self.model_url = model_url
-        self.pe_tokenizer = SGLangTokenizerWrapper(model_url)
+        self.pe_tokenizer = None #SGLangTokenizerWrapper(model_url)
 
     def generate(self, prompt: str, sampling_params: dict) -> dict:
         response = requests.post(
