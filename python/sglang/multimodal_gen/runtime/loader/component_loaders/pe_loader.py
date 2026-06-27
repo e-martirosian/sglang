@@ -104,7 +104,7 @@ class PESGLangModelWrapper:
         #     self.model_url + "/generate", json={"text": prompt, "sampling_params": sampling_params}
         # )
         response = requests.post(
-            self.model_url + "/chat/completions", json={"text": text, "sampling_params": sampling_params}
+            self.model_url + "/chat/completions", json={"text": prompt, "sampling_params": sampling_params}
         )
         data = response.json()
         # logger.info(data)
