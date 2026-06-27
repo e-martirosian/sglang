@@ -83,7 +83,7 @@ class PromptEnhancementStage(PipelineStage):
             tokenize=False,
             add_generation_prompt=False,
         )
-        logger.info(f"Output of pe_tokenizer {input_text}")
+        # logger.info(f"Output of pe_tokenizer {input_text}")
 
         sampling_params = {"max_new_tokens": max_new_tokens}
         if temperature is not None:
@@ -96,6 +96,6 @@ class PromptEnhancementStage(PipelineStage):
             sampling_params=sampling_params,
         )
 
-        logger.info(f"Output of pe_model generate {output['text'].strip()}")
+        # logger.info(f"Output of pe_model generate {output['text'].strip()}")
 
         return output["text"].strip()
