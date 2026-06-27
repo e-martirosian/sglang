@@ -1635,7 +1635,7 @@ class ServerArgs(DisaggServerArgsMixin):
         )
         # SGLang backend for PE stage
         parser.add_argument(
-            "--pe-model-url",
+            "--pe-server-url",
             type=str,
             default=ServerArgs.pe_server_url,
             help="Url of SGLang server for PE stage",
