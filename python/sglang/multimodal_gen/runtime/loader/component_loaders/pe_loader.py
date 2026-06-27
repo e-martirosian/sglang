@@ -82,7 +82,7 @@ class PEModelWrapper:
 
 class SGLangTokenizerWrapper:
     def __init__(self, model_url):
-        self.mode_url = model_url
+        self.model_url = model_url
     def apply_chat_template(self, messages, tokenize, add_generation_prompt):
         response = requests.post(
             self.model_url + "/completions", json={"messages": messages, "tokenize": tokenize, "add_generation_prompt": add_generation_prompt}
