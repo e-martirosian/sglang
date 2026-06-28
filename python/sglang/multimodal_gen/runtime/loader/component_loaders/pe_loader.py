@@ -98,7 +98,7 @@ class PESGLangModelWrapper:
 
     def __init__(self, model_url):
         self.model_url = model_url
-        self.pe_tokenizer = GLangTokenizerWrapper(model_url)
+        self.pe_tokenizer = SGLangTokenizerWrapper(model_url)
 
     def generate(self, prompt: str, sampling_params: dict) -> dict:
         response = requests.post(
