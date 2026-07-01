@@ -456,6 +456,7 @@ class Mistral3Model(nn.Module):
 
     def __init__(self, config: Mistral3Config):
         super().__init__()
+        logger.info(config)
         self.language_model = MistralModel(config.text_config)
         self.config = config
 
