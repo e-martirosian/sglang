@@ -138,6 +138,7 @@ def init_tokenizer_manager(
     TokenizerManagerClass: Optional[TokenizerManager] = None,
 ) -> Tuple[TokenizerManager, TemplateManager]:
     logger.info("Init tokenizer manager |||||||||||||||||||||||||||||||||||||||")
+    logger.info(server_args.chat_template)
     # Launch tokenizer process
     TokenizerManagerClass = TokenizerManagerClass or TokenizerManager
     tokenizer_manager = TokenizerManagerClass(server_args, port_args)
@@ -398,6 +399,7 @@ class Engine(EngineScoreMixin, EngineBase):
             session_params=session_params,
             priority=priority,
         )
+        logger.info("Use Engine generate function ||||||||||||||||||||||")
         generator = self.tokenizer_manager.generate_request(obj, None)
 
         if stream:
