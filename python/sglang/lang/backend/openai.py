@@ -143,6 +143,7 @@ class OpenAI(BaseBackend):
         sampling_params: SglSamplingParams,
         spec_var_name: str = None,
     ):
+        logger.info("GENERATE OPENAI ||||||||||||||||||||||||||||")
         if sampling_params.dtype is None:
             if self.is_chat_model:
                 if s.num_api_spec_tokens is None:
