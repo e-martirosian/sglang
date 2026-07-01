@@ -137,6 +137,7 @@ def init_tokenizer_manager(
     port_args: PortArgs,
     TokenizerManagerClass: Optional[TokenizerManager] = None,
 ) -> Tuple[TokenizerManager, TemplateManager]:
+    logger.info("Init tokenizer manager |||||||||||||||||||||||||||||||||||||||")
     # Launch tokenizer process
     TokenizerManagerClass = TokenizerManagerClass or TokenizerManager
     tokenizer_manager = TokenizerManagerClass(server_args, port_args)
