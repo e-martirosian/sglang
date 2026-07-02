@@ -137,7 +137,7 @@ class Ministral3DecoderLayer(LlamaDecoderLayer):
 def save_hidden(name):
     def hook(module, inp, out):
         # out is hidden state: [B, T, D]
-        cache[name] = out.detach().float().cpu()
+        cache[name] = out[0].detach().float().cpu()
     return hook
  
 class Ministral3Model(LlamaModel):
