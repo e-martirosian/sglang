@@ -12,9 +12,7 @@ from sglang.srt.models.llama import (
     LlamaModel,
 )
 from sglang.srt.utils import add_prefix, make_layers
-from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
-logger = init_logger(__name__)
 
 def _get_llama_4_attn_scale(
     positions_ids: torch.Tensor, beta: float, max_position_embeddings: int
@@ -140,8 +138,6 @@ class Ministral3Model(LlamaModel):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        logger.info("I AM IN Ministral3Model")
-        logger.info(config)
         # Override layer creation to use Ministral3Attention
         super().__init__(config=config, quant_config=quant_config, prefix=prefix)
 
@@ -167,8 +163,6 @@ class Ministral3ForCausalLM(LlamaForCausalLM):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
-        logger.info(config)
-        logger.info(quant_config)
         return Ministral3Model(config=config, quant_config=quant_config, prefix=prefix)
 
 
