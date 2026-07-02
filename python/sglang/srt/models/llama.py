@@ -57,7 +57,7 @@ from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import add_prefix, is_cuda, is_npu, is_xpu, make_layers
 from sglang.utils import get_exception_traceback
 
-from transformers.models.mistral3.modeling_mistral3 import (
+from transformers.models.ministral3.modeling_ministral3 import (
     Ministral3RotaryEmbedding,
 )
 
