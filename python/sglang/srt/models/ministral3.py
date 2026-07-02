@@ -77,6 +77,10 @@ class Ministral3Attention(LlamaAttention):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
+        logger.info(q.dispatch())
+        logger.info(k.dispatch())
+        logger.info(v.dispatch())
+
         # Apply RoPE
         q, k = self.rotary_emb(positions, q, k)
 

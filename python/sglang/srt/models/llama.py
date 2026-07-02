@@ -306,7 +306,7 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=add_prefix("mlp", prefix),
         )
-        logger.info(f"config {config.hidden_size} {config.rms_norm_eps} ||||||||||||||||||||")
+        # logger.info(f"config {config.hidden_size} {config.rms_norm_eps} ||||||||||||||||||||")
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
