@@ -166,8 +166,12 @@ class Ministral3Model(LlamaModel):
             prefix="model.layers",
         )
 
-        for layer in self.layers:
-            layer.register_forward_hook(save_hidden(f"layer_{layer.name}"))
+        for name, module in self.named_modules():
+            if isinstance(module, Ministral3DecoderLayer):
+                module.register_forward_hook(save_hidden(name))
+
+        # for layer in self.layers:
+        #     layer.register_forward_hook(save_hidden(f"layer_{layer.name}"))
         logger.info(self)
 
 
