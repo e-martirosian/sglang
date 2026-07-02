@@ -80,20 +80,21 @@ class Ministral3Attention(LlamaAttention):
         # Apply RoPE
         # q, k = self.rotary_emb(positions, q, k)
         q, k = self.rotary_emb(positions, hidden_states)
-
-        # # Ministral3 / Llama 4 scaling
-        if self.llama_4_scaling_beta is not None:
-            scale = _get_llama_4_attn_scale(
-                positions, self.llama_4_scaling_beta, self.max_position_embeddings
-            ).to(q.dtype)
-            # q shape is [batch_size * seq_len, num_heads * head_dim] or [batch_size * seq_len, num_heads, head_dim]
-            # positions is [batch_size * seq_len]
-            # scale is [batch_size * seq_len, 1]
-            # We need to reshape q to apply scale correctly if it's flattened
-            # Assuming q is (total_tokens, num_heads * head_dim)
-            q = q.view(-1, self.num_heads, self.head_dim)
-            q = q * scale.unsqueeze(1)  # Broadcast over heads
-            q = q.view(-1, self.num_heads * self.head_dim)
+        logger.info(q)
+        logger.info(k)
+        # # # Ministral3 / Llama 4 scaling
+        # if self.llama_4_scaling_beta is not None:
+        #     scale = _get_llama_4_attn_scale(
+        #         positions, self.llama_4_scaling_beta, self.max_position_embeddings
+        #     ).to(q.dtype)
+        #     # q shape is [batch_size * seq_len, num_heads * head_dim] or [batch_size * seq_len, num_heads, head_dim]
+        #     # positions is [batch_size * seq_len]
+        #     # scale is [batch_size * seq_len, 1]
+        #     # We need to reshape q to apply scale correctly if it's flattened
+        #     # Assuming q is (total_tokens, num_heads * head_dim)
+        #     q = q.view(-1, self.num_heads, self.head_dim)
+        #     q = q * scale.unsqueeze(1)  # Broadcast over heads
+        #     q = q.view(-1, self.num_heads * self.head_dim)
 
         # attn_output = self.attn(q, k, v, forward_batch)
         # logger.info(position_embeddings)
