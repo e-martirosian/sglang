@@ -158,6 +158,7 @@ class Ministral3Model(LlamaModel):
             pp_size=self.pp_group.world_size,
             prefix="model.layers",
         )
+        logger.info(self)
 
 
 class Ministral3ForCausalLM(LlamaForCausalLM):
