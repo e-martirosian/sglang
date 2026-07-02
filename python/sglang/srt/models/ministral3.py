@@ -10,6 +10,7 @@ from sglang.srt.models.llama import (
     LlamaDecoderLayer,
     LlamaForCausalLM,
     LlamaModel,
+    cache
 )
 from sglang.srt.utils import add_prefix, make_layers
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
@@ -133,6 +134,12 @@ class Ministral3DecoderLayer(LlamaDecoderLayer):
         )
 
 
+def save_hidden(name):
+    def hook(module, inp, out):
+        # out is hidden state: [B, T, D]
+        cache[name] = out.detach().float().cpu()
+    return hook
+ 
 class Ministral3Model(LlamaModel):
     def __init__(
         self,
@@ -158,6 +165,9 @@ class Ministral3Model(LlamaModel):
             pp_size=self.pp_group.world_size,
             prefix="model.layers",
         )
+
+        for layer in self.layers:
+            layer.register_forward_hook(save_hidden(f"layer_{layer.name}"))
         logger.info(self)
 
 
