@@ -58,7 +58,7 @@ from sglang.srt.utils import add_prefix, is_cuda, is_npu, is_xpu, make_layers
 from sglang.utils import get_exception_traceback
 
 from transformers.models.mistral.modeling_mistral import (
-    MistralRotaryEmbedding,
+    MinistralRotaryEmbedding,
 )
 
 _is_cuda = is_cuda()
@@ -198,7 +198,7 @@ class LlamaAttention(nn.Module):
             rope_scaling=rope_scaling,
             is_neox_style=rope_is_neox_style,
         )
-        self.rotary_emb = MistralRotaryEmbedding(config=config)
+        self.rotary_emb = MinistralRotaryEmbedding(config=config)
 
         self.attn = RadixAttention(
             self.num_heads,
