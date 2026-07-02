@@ -167,6 +167,8 @@ class Ministral3ForCausalLM(LlamaForCausalLM):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
+        logger.info(config)
+        logger.info(quant_config)
         return Ministral3Model(config=config, quant_config=quant_config, prefix=prefix)
 
 
