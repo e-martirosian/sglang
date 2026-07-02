@@ -390,7 +390,6 @@ class LlamaModel(nn.Module):
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]], PPProxyTensors]:
-        logger.info(input_ids.shape)
 
         if self.pp_group.is_first_rank:
             if input_embeds is None:
