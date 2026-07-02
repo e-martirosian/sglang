@@ -95,7 +95,7 @@ class Ministral3Attention(LlamaAttention):
             q = q.view(-1, self.num_heads * self.head_dim)
 
         attn_output = self.attn(q, k, v, forward_batch)
-        logger.info(f"{attn_output}")
+        logger.info(f"{attn_output.float().norm().item()}")
         output, _ = self.o_proj(attn_output)
         return output
 
