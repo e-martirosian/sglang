@@ -74,27 +74,30 @@ class Ministral3Attention(LlamaAttention):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # qkv, _ = self.qkv_proj(hidden_states)
+        # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         # Apply RoPE
-        q, k = self.rotary_emb(positions, q, k)
+        # q, k = self.rotary_emb(positions, q, k)
+        position_embeddings= self.rotary_emb(positions, hidden_states)
 
-        # Ministral3 / Llama 4 scaling
-        if self.llama_4_scaling_beta is not None:
-            scale = _get_llama_4_attn_scale(
-                positions, self.llama_4_scaling_beta, self.max_position_embeddings
-            ).to(q.dtype)
-            # q shape is [batch_size * seq_len, num_heads * head_dim] or [batch_size * seq_len, num_heads, head_dim]
-            # positions is [batch_size * seq_len]
-            # scale is [batch_size * seq_len, 1]
-            # We need to reshape q to apply scale correctly if it's flattened
-            # Assuming q is (total_tokens, num_heads * head_dim)
-            q = q.view(-1, self.num_heads, self.head_dim)
-            q = q * scale.unsqueeze(1)  # Broadcast over heads
-            q = q.view(-1, self.num_heads * self.head_dim)
+        # # Ministral3 / Llama 4 scaling
+        # if self.llama_4_scaling_beta is not None:
+        #     scale = _get_llama_4_attn_scale(
+        #         positions, self.llama_4_scaling_beta, self.max_position_embeddings
+        #     ).to(q.dtype)
+        #     # q shape is [batch_size * seq_len, num_heads * head_dim] or [batch_size * seq_len, num_heads, head_dim]
+        #     # positions is [batch_size * seq_len]
+        #     # scale is [batch_size * seq_len, 1]
+        #     # We need to reshape q to apply scale correctly if it's flattened
+        #     # Assuming q is (total_tokens, num_heads * head_dim)
+        #     q = q.view(-1, self.num_heads, self.head_dim)
+        #     q = q * scale.unsqueeze(1)  # Broadcast over heads
+        #     q = q.view(-1, self.num_heads * self.head_dim)
 
-        attn_output = self.attn(q, k, v, forward_batch)
+        # attn_output = self.attn(q, k, v, forward_batch)
+        attn_output = self.attn(position_embeddings[0],
+                                 position_embeddings[1], position_embeddings[2], forward_batch)
         # logger.info(f"{attn_output.float().norm().detach()}")
         output, _ = self.o_proj(attn_output)
         return output

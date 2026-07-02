@@ -199,7 +199,6 @@ class LlamaAttention(nn.Module):
             is_neox_style=rope_is_neox_style,
         )
 
-        config.rope_type = ["default"] * 100
         self.rotary_emb = Ministral3RotaryEmbedding(config=config)
 
         self.attn = RadixAttention(
