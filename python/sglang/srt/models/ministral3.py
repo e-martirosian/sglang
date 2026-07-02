@@ -74,12 +74,12 @@ class Ministral3Attention(LlamaAttention):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        # qkv, _ = self.qkv_proj(hidden_states)
-        # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         # Apply RoPE
         # q, k = self.rotary_emb(positions, q, k)
-        position_embeddings= self.rotary_emb(positions, hidden_states)
+        position_embeddings= self.rotary_emb(positions, [q, k])
 
         # # Ministral3 / Llama 4 scaling
         # if self.llama_4_scaling_beta is not None:
@@ -98,7 +98,7 @@ class Ministral3Attention(LlamaAttention):
         # attn_output = self.attn(q, k, v, forward_batch)
         logger.info(position_embeddings)
         attn_output = self.attn(position_embeddings[0],
-                                 position_embeddings[1], position_embeddings[2], forward_batch)
+                                 position_embeddings[1], v, forward_batch)
         # logger.info(f"{attn_output.float().norm().detach()}")
         output, _ = self.o_proj(attn_output)
         return output
