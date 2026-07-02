@@ -1054,7 +1054,7 @@ class TransformersBase(nn.Module):
         input_embeds: torch.Tensor = None,
         get_embedding: bool = False,
     ) -> Union[LogitsProcessorOutput, EmbeddingPoolerOutput, PPProxyTensors]:
-        logger.info(input_ids)
+        logger.info(input_ids.shape)
         runtime_input_ids: Optional[torch.Tensor] = input_ids
         runtime_input_embeds = input_embeds
         if not self.pp_group.is_first_rank:
