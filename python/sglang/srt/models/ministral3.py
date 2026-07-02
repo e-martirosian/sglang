@@ -79,7 +79,7 @@ class Ministral3Attention(LlamaAttention):
 
         # Apply RoPE
         # q, k = self.rotary_emb(positions, q, k)
-        position_embeddings= self.rotary_emb(positions, [q, k])
+        position_embeddings= self.rotary_emb(positions, hidden_states)
 
         # # Ministral3 / Llama 4 scaling
         # if self.llama_4_scaling_beta is not None:
