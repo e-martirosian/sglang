@@ -3,6 +3,7 @@ import json
 import os
 
 import torch
+import requests
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
@@ -79,6 +80,39 @@ class PEModelWrapper:
         return self
 
 
+class SGLangTokenizerWrapper:
+    def __init__(self, model_url):
+        self.model_url = model_url
+    def apply_chat_template(self, messages, tokenize, add_generation_prompt):
+        return messages
+        response = requests.post(
+            self.model_url + "/chat/completions", json={"text": messages, "tokenize": tokenize, "add_generation_prompt": add_generation_prompt}
+        )
+        data = response.json()
+        text = data.get("text")
+        return {"text": text}
+
+
+class PESGLangModelWrapper:
+
+    def __init__(self, model_url):
+        self.model_url = model_url
+        self.pe_tokenizer = None #SGLangTokenizerWrapper(model_url)
+
+    def generate(self, prompt: str, sampling_params: dict) -> dict:
+        response = requests.post(
+            self.model_url + "/generate", json={"text": prompt, "sampling_params": sampling_params}
+        )
+        data = response.json()
+        text = data.get("text")
+        return {"text": text}
+
+    def to(self, *args, **kwargs):
+        """Move underlying model to device."""
+        logger.warning("SGLang backend is used, can't move model to device.")
+        return self
+
+
 class PELoader(ComponentLoader):
     """Loader for prompt-enhancement causal LM (Ministral-3 based)."""
 
@@ -88,6 +122,12 @@ class PELoader(ComponentLoader):
     def load_customized(
         self, component_model_path: str, server_args: ServerArgs, component_name: str
     ):
+        if server_args.pe_server_url is not None:
+            logger.info(
+                f"Use {server_args.pe_server_url} server for PE"
+            )
+            return PESGLangModelWrapper(server_args.pe_server_url)
+
         logger.info("Loading PE model from %s ...", component_model_path)
 
         pe_tokenizer_dir = os.path.join(
