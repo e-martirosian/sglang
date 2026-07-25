@@ -1,0 +1,51 @@
+
+TEXT-TO-VIDEO (1-NPU)
+
+	TextEncodingStage	LTX2AVDenoisingStage	ltx2_lora_switch_stage2	LTX2RefinementStage	LTX2AVDecodingStage	Total	Memory
+export SGLANG_TORCH_PROFILER_DIR=/ltx_2_one_stage	1.8086 seconds	132.5677 seconds			2.8154 seconds	138.73 seconds	 Max peak: 53832.00 MB, Avg peak: 53832.00 MB
+
+sglang generate   --model-path /root/.cache/modelscope/hub/models/Lightricks/LTX-2   --pipeline-class-name LTX2Pipeline   --prompt "A quiet coastal town at sunrise, fishing boats moving slowly through golden mist, cinematic camera movement"
+ export SGLANG_TORCH_PROFILER_DIR=/ltx_2_two_stage_t2v 	1.9530	40.9273 	9.8530	10.2427 	2.0044 	66.71	Max peak: 60928.00 MB, Avg peak: 60928.00 MB
+
+sglang generate   --model-path /root/.cache/modelscope/hub/models/Lightricks/LTX-2 --pipeline-class-name LTX2TwoStagePipeline --prompt "A quiet coastal town at sunrise, fishing boats moving slowly through golden mist, cinematic camera movement"
+							
+
+TEXT-Image-TO-VIDEO (1-NPU)
+
+	TextEncodingStage	LTX2ImageEncodingStage	LTX2AVDenoisingStage	ltx2_lora_switch_stage2	LTX2RefinementStage 	LTX2AVDecodingStage	Total	Memory
+export SGLANG_TORCH_PROFILER_DIR=/ltx_2_one_stage_ti2v	1.8156 	 4.0407 	142.0211 				152.84	Max peak: 54902.00 MB, Avg peak: 54902.00 MB
+
+sglang generate   --model-path /root/.cache/modelscope/hub/models/Lightricks/LTX-2 --image-path ./start.png ./end.png  --pipeline-class-name LTX2Pipeline   --prompt "A quiet coastal town at sunrise, fishing boats moving slowly through golden mist, cinematic camera movement"
+export SGLANG_TORCH_PROFILER_DIR=/ltx_2_two_stage_ti2v	 1.8313 	3.3854 	40.3628 	19.7637 	10.6300 	3.5478 	81.90	Max peak: 61330.00 MB, Avg peak: 61330.00 MB
+
+sglang generate   --model-path /root/.cache/modelscope/hub/models/Lightricks/LTX-2 --image-path ./start.png ./end.png  --pipeline-class-name LTX2TwoStagePipeline --prompt "A quiet coastal town at sunrise, fishing boats moving slowly through golden mist, cinematic camera movement"
+
+								
+
+TEXT-TO-VIDEO (2-NPU)
+
+	TextEncodingStage	LTX2AVDenoisingStage	ltx2_lora_switch_stage2	LTX2RefinementStage	LTX2AVDecodingStage	Total	Memory
+export SGLANG_TORCH_PROFILER_DIR=/ltx_2_one_stage_2npu	2.3387 	72.0829 			2.4530	79.22 	Max peak: 55834.00 MB, Avg peak: 55834.00 MB
+
+sglang generate   --model-path /root/.cache/modelscope/hub/models/Lightricks/LTX-2   --pipeline-class-name LTX2Pipeline   --prompt "A quiet coastal town at sunrise, fishing boats moving slowly through golden mist, cinematic camera movement"  --num-gpus 2 --enable-cfg-parallel
+
+ export SGLANG_TORCH_PROFILER_DIR=/ltx_2_two_stage_t2v_2npu_resident_memory	 2.4408 	29.9059 	12.1189  	7.7859 	7.2458 	 62.94 	 Max peak: 60334.00 MB, Avg peak: 60334.00 MB
+
+sglang generate   --model-path /root/.cache/modelscope/hub/models/Lightricks/LTX-2 --pipeline-class-name LTX2TwoStagePipeline --prompt "A quiet coastal town at sunrise, fishing boats moving slowly through golden mist, cinematic camera movement"  --num-gpus 2 --enable-cfg-parallel  --ltx2-two-stage-device-mode resident  --performance-mode memory
+
+(doesn't work without  --performance-mode memory at all, memory out on LTX2AVDecodingStage - last stage, with original and with this option this last stage works long and give warning Process group work COALESCED, seq_num 0 dispatch timeout. device 0: EmptyQueue, I stopped it after 45 minutes )
+							
+
+
+TEXT-Image-TO-VIDEO (2-NPU)
+
+	TextEncodingStage	LTX2ImageEncodingStage	LTX2AVDenoisingStage	ltx2_lora_switch_stage2	LTX2RefinementStage 	LTX2AVDecodingStage	Total	Memory
+export SGLANG_TORCH_PROFILER_DIR=/ltx_2_one_stage_ti2v_2npu	2.4227	4.7094 	74.3772 			2.3638 	86.65 	Max peak: 56838.00 MB, Avg peak: 56838.00 MB
+
+sglang generate   --model-path /root/.cache/modelscope/hub/models/Lightricks/LTX-2 --image-path ./start.png ./end.png  --pipeline-class-name LTX2Pipeline   --prompt "A quiet coastal town at sunrise, fishing boats moving slowly through golden mist, cinematic camera movement" --num-gpus 2 --enable-cfg-parallel
+export SGLANG_TORCH_PROFILER_DIR=/ltx_2_two_stage_ti2v_2npu								
+
+sglang generate   --model-path /root/.cache/modelscope/hub/models/Lightricks/LTX-2 --image-path ./start.png ./end.png  --pipeline-class-name LTX2TwoStagePipeline --prompt "A quiet coastal town at sunrise, fishing boats moving slowly through golden mist, cinematic camera movement" --num-gpus 2 --enable-cfg-parallel  --ltx2-two-stage-device-mode resident  --performance-mode memory
+
+								
+
