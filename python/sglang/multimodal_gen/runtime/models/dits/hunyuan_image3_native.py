@@ -55,6 +55,10 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 
+# Query-axis chunk size for the NPU eager attention fallback: bounds the
+# materialized fp32 score matrix to [b, h, CHUNK, S] per chunk.
+_NPU_ATTN_QUERY_CHUNK = 512
+
 BatchRaggedImages = Union[torch.Tensor, List[Union[torch.Tensor, List[torch.Tensor]]]]
 BatchRaggedTensor = Union[torch.Tensor, List[torch.Tensor]]
 
@@ -762,14 +766,32 @@ class HunyuanImage3SDPAAttention(nn.Module):
             # causal attention and yields degenerate diffusion predictions
             # (white images).  Use an explicit math implementation instead;
             # its semantics match SDPA exactly (bool mask: True = attend).
-            attn_weights = torch.matmul(
-                query_states.float(), key_states.float().transpose(2, 3)
-            ) / math.sqrt(self.head_dim)
-            attn_weights = attn_weights + torch.where(
-                attention_mask, 0.0, torch.finfo(torch.float32).min
+            # Chunked along the query axis: materializing the full
+            # [b, h, L, S] fp32 score matrix OOMs the NPU at image sequence
+            # lengths (~4.5k tokens, CFG batch 2, 32 heads).
+            scale = 1.0 / math.sqrt(self.head_dim)
+            key_t = key_states.float().transpose(2, 3)
+            attn_chunks = []
+            for start in range(0, q_len, _NPU_ATTN_QUERY_CHUNK):
+                end = min(start + _NPU_ATTN_QUERY_CHUNK, q_len)
+                attn_weights = (
+                    torch.matmul(query_states[:, :, start:end].float(), key_t)
+                    * scale
+                )
+                attn_weights += torch.where(
+                    attention_mask[:, :, start:end, :],
+                    0.0,
+                    torch.finfo(torch.float32).min,
+                )
+                attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32)
+                attn_chunks.append(
+                    torch.matmul(attn_weights.to(value_states.dtype), value_states)
+                )
+            attn_output = (
+                torch.cat(attn_chunks, dim=2)
+                if len(attn_chunks) > 1
+                else attn_chunks[0]
             )
-            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32)
-            attn_output = torch.matmul(attn_weights.to(value_states.dtype), value_states)
         else:
             # SDPA memory-efficient backend needs contiguous inputs with masks
             if query_states.device.type == "cuda" and attention_mask is not None:
