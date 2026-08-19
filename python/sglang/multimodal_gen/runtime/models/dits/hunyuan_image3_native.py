@@ -21,6 +21,7 @@ vision_aligner, guidance/timestep-r embeddings (cfg_distilled / meanflow
 off in the released checkpoint), Taylor cache, flashinfer fused MoE.
 """
 
+import math
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple, Union
 
@@ -755,14 +756,29 @@ class HunyuanImage3SDPAAttention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        # SDPA memory-efficient backend needs contiguous inputs with masks
-        if query_states.device.type == "cuda" and attention_mask is not None:
-            query_states = query_states.contiguous()
-            key_states = key_states.contiguous()
-            value_states = value_states.contiguous()
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states, key_states, value_states, attn_mask=attention_mask, dropout_p=0.0
-        )
+        if query_states.device.type == "npu" and attention_mask is not None:
+            # The NPU SDPA dispatch is unreliable with 4-D bool masks: the
+            # masking can be silently dropped or misinterpreted, which breaks
+            # causal attention and yields degenerate diffusion predictions
+            # (white images).  Use an explicit math implementation instead;
+            # its semantics match SDPA exactly (bool mask: True = attend).
+            attn_weights = torch.matmul(
+                query_states.float(), key_states.float().transpose(2, 3)
+            ) / math.sqrt(self.head_dim)
+            attn_weights = attn_weights + torch.where(
+                attention_mask, 0.0, torch.finfo(torch.float32).min
+            )
+            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32)
+            attn_output = torch.matmul(attn_weights.to(value_states.dtype), value_states)
+        else:
+            # SDPA memory-efficient backend needs contiguous inputs with masks
+            if query_states.device.type == "cuda" and attention_mask is not None:
+                query_states = query_states.contiguous()
+                key_states = key_states.contiguous()
+                value_states = value_states.contiguous()
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                query_states, key_states, value_states, attn_mask=attention_mask, dropout_p=0.0
+            )
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, q_len, -1)
 

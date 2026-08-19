@@ -527,6 +527,21 @@ class HunyuanImage3DenoiseStage(PipelineStage):
                 )
                 pred = model_output["diffusion_prediction"].to(dtype=torch.float32)
 
+                if i == 0:
+                    # One-shot diagnostics: a healthy flow-matching velocity
+                    # prediction has O(1) std; near-zero std or NaN/inf means
+                    # the AR conditioning is broken upstream.
+                    logger.info(
+                        "HunyuanImage-3.0 step-0 prediction stats: shape=%s, "
+                        "mean=%.4f, std=%.4f, absmax=%.4f, nan=%s, inf=%s",
+                        tuple(pred.shape),
+                        pred.mean().item(),
+                        pred.std().item(),
+                        pred.abs().max().item(),
+                        torch.isnan(pred).any().item(),
+                        torch.isinf(pred).any().item(),
+                    )
+
                 if do_cfg and not cfg_distilled:
                     pred_cond, pred_uncond = pred.chunk(2)
                     # Upstream ClassifierFreeGuidance (non-original formulation):
