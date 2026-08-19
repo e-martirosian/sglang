@@ -1,15 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 """Model adapter for HunyuanImage-3.0.
 
-The public checkpoint (``tencent/HunyuanImage-3.0-Instruct``) ships its model
-code alongside the weights (``trust_remote_code``): ``HunyuanImage3ForCausalMM``
-in ``modeling_hunyuan_image_3.py`` bundles the MoE AR backbone, the
-flow-matching image head (UNet patch embed / final layer + timestep embeds),
-the SigLIP2 vision encoder, and the ``AutoencoderKLConv3D`` VAE.
+The public checkpoint (``tencent/HunyuanImage-3.0-Instruct``) is a unified
+autoregressive text-to-image model: an 80B MoE AR backbone plus a
+flow-matching image head, with an ``AutoencoderKLConv3D`` VAE.  All of it is
+implemented natively in sglang:
 
-Rather than re-implementing an 80B model inside sglang, this adapter loads the
-official implementation exactly the way upstream does (``AutoModelForCausalLM``
-+ ``load_tokenizer``) and exposes the pieces the pipeline stages need:
+* :mod:`...models.dits.hunyuan_image3_native` – the AR MoE backbone + image
+  head (``HunyuanImage3ForCausalMM``)
+* :mod:`...models.dits.hunyuan_image3_inputs` – input preparation
+  (``prepare_model_inputs`` / ``generate_text`` / attention masks / KV cache)
+* :mod:`...models.vaes.autoencoder_kl_conv3d` – the VAE
+
+Only the official ``HunyuanImage3TokenizerFast`` (chat template / special
+tokens) and the ``system_prompt`` text module are kept from the checkpoint's
+remote code.  Weights stream from the sharded safetensors with an identity
+name mapping; ``vision_model.*`` / ``vision_aligner.*`` (SigLIP2, unused for
+T2I) are skipped.
+
+The adapter exposes the pieces the pipeline stages need:
 
 * :meth:`prepare_model_inputs` – chat-template + tokenization + KV-cache setup
 * :meth:`generate_text` – AR generation for the think/recaption stage
@@ -21,11 +30,38 @@ MoE implementation (no FlashInfer / FlashAttention / Triton), so it runs on
 both CUDA and NPU.
 """
 
+import glob
+import importlib.util
+import json
+import os
+from itertools import chain
+from types import SimpleNamespace
 from typing import Any
 
 import torch
 import torch.nn as nn
 
+from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
+from sglang.multimodal_gen.runtime.loader.fsdp_load import (
+    load_model_from_full_model_state_dict,
+)
+from sglang.multimodal_gen.runtime.loader.utils import (
+    get_param_names_mapping,
+    set_default_torch_dtype,
+)
+from sglang.multimodal_gen.runtime.loader.weight_utils import (
+    safetensors_weights_iterator,
+)
+from sglang.multimodal_gen.runtime.models.dits.hunyuan_image3_inputs import (
+    HunyuanImage3NativeImageProcessor,
+)
+from sglang.multimodal_gen.runtime.models.dits.hunyuan_image3_native import (
+    HunyuanImage3ForCausalMM,
+    HunyuanImage3NativeConfig,
+)
+from sglang.multimodal_gen.runtime.models.vaes.autoencoder_kl_conv3d import (
+    AutoencoderKLConv3D,
+)
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
@@ -34,8 +70,39 @@ logger = init_logger(__name__)
 _is_npu = current_platform.is_npu()
 
 
+class _NativeConfigView:
+    """Official-config-compatible view over the native config dataclass.
+
+    The pipeline stages were written against the official HF config, which
+    exposes ``config.vae`` (a dict) and ``config.vae_downsample_factor``;
+    this proxy adds those on top of :class:`HunyuanImage3NativeConfig`.
+    """
+
+    def __init__(self, native_config):
+        object.__setattr__(self, "_native", native_config)
+        vae_ds = native_config.vae_downsample_factor
+        if isinstance(vae_ds, (list, tuple)):
+            vae_ds = vae_ds[0]
+        object.__setattr__(
+            self,
+            "vae",
+            {
+                "latent_channels": native_config.vae_latent_channels,
+                "scaling_factor": None,
+                "shift_factor": None,
+            },
+        )
+        object.__setattr__(self, "vae_downsample_factor", vae_ds)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_native"), name)
+
+    def __setattr__(self, name, value):
+        setattr(object.__getattribute__(self, "_native"), name, value)
+
+
 class HunyuanImage3ARTransformer(nn.Module):
-    """Adapter wrapping the official HunyuanImage-3.0 remote-code model."""
+    """Adapter wrapping the native HunyuanImage-3.0 model."""
 
     _aliases = [
         "HunyuanImage3ForCausalMM",
@@ -50,69 +117,160 @@ class HunyuanImage3ARTransformer(nn.Module):
         # Generic bookkeeping attributes expected by pipeline utilities.
         self.hidden_size = getattr(config, "hidden_size", 4096)
         self.num_attention_heads = getattr(config, "num_attention_heads", 32)
-        self.num_channels_latents = config.vae.get("latent_channels", 32)
+        self.num_channels_latents = getattr(config, "vae_latent_channels", 32)
         vae_ds = config.vae_downsample_factor
         self.vae_scale_factor = vae_ds if isinstance(vae_ds, int) else vae_ds[0]
+        # The denoise stage reads ``config.vae["latent_channels"]`` /
+        # ``config.vae_downsample_factor`` with the official config layout;
+        # expose that view on top of the native config.
+        self._config_view = _NativeConfigView(config)
 
     # ------------------------------------------------------------------
     # Loading
     # ------------------------------------------------------------------
     @classmethod
-    def from_official_pretrained(
+    def from_native_pretrained(
         cls,
         model_path: str,
         server_args: Any = None,
-        attn_implementation: str = "sdpa",
-        moe_impl: str = "eager",
         torch_dtype: Any = torch.bfloat16,
     ) -> "HunyuanImage3ARTransformer":
-        """Load the checkpoint exactly like upstream ``run_image_gen.py``.
+        """Load the checkpoint into the native sglang implementation.
 
-        Notes:
-        * Upstream requires the local directory name to contain no dots
-          (transformers remote-code import limitation).
-        * ``device_map="auto"`` shards the 80B weights across the visible
-          accelerators; on NPU this relies on torch_npu device registration.
-        * ``moe_impl="eager"`` keeps the MoE dispatch in pure PyTorch
-          (FlashInfer is CUDA-only), which is what the official eager path and
-          our NPU target need.
+        * AR backbone + image head stream from the sharded safetensors with
+          an identity parameter-name mapping (``vision_model.*`` /
+          ``vision_aligner.*`` are skipped – SigLIP2 is unused for T2I).
+        * The VAE (``vae.*`` tensors) loads into the native
+          ``AutoencoderKLConv3D`` in fp32, mirroring the official
+          ``vae_dtype=float32`` setup.
+        * The tokenizer is the official ``HunyuanImage3TokenizerFast``
+          (trust_remote_code basic functionality, kept by design).
         """
-        from transformers import AutoModelForCausalLM
+        device = get_local_torch_device()
 
-        if "." in str(model_path).split("/")[-1]:
-            logger.warning(
-                "HunyuanImage-3.0 model directory %r contains a dot; upstream "
-                "notes this can break trust_remote_code loading. Consider "
-                "renaming the directory (e.g. HunyuanImage-3-Instruct).",
-                model_path,
+        with open(os.path.join(model_path, "config.json"), "r", encoding="utf-8") as f:
+            hf_config = json.load(f)
+        config = HunyuanImage3NativeConfig.from_hf_config(hf_config)
+
+        logger.info(
+            "Loading native HunyuanImage-3.0 from %s (dtype=%s)",
+            model_path,
+            torch_dtype,
+        )
+
+        # --- AR backbone + image head ---------------------------------
+        with set_default_torch_dtype(torch_dtype), torch.device("meta"):
+            inner = HunyuanImage3ForCausalMM(config)
+
+        safetensors_list = sorted(
+            glob.glob(os.path.join(model_path, "*.safetensors"))
+        )
+        if not safetensors_list:
+            raise FileNotFoundError(
+                f"No safetensors files found in {model_path}"
             )
 
-        # Determine device_map.  For NPU (and single-GPU CUDA) we still use
-        # "auto" so that transformers shards the 80B weights across all visible
-        # devices.  When the caller passes an explicit num_gpus > 1 via
-        # server_args we honour it; otherwise transformers auto-detects.
-        device_map = "auto"
+        def _backbone_key_filter(name: str) -> bool:
+            # Skip the SigLIP2 vision tower / aligner (not implemented) and
+            # the VAE (loaded separately into the native VAE).
+            return not name.startswith(
+                ("vision_model.", "vision_aligner.", "vae.")
+            )
 
-        kwargs = dict(
-            attn_implementation=attn_implementation,
-            trust_remote_code=True,
-            dtype=torch_dtype,
-            device_map=device_map,
-            moe_impl=moe_impl,
-            moe_drop_tokens=True,
+        weight_iterator = safetensors_weights_iterator(
+            safetensors_list, key_filter=_backbone_key_filter
         )
-        logger.info(
-            "Loading official HunyuanImage-3.0 model from %s "
-            "(attn=%s, moe=%s, device_map=%s)",
-            model_path,
-            attn_implementation,
-            moe_impl,
-            device_map,
+        load_model_from_full_model_state_dict(
+            inner,
+            weight_iterator,
+            device,
+            torch_dtype,
+            strict=False,
+            cpu_offload=bool(getattr(server_args, "dit_cpu_offload", False)),
+            param_names_mapping=get_param_names_mapping(inner.param_names_mapping),
         )
-        inner = AutoModelForCausalLM.from_pretrained(model_path, **kwargs)
-        # Upstream binds the HunyuanImage3TokenizerFast this way.
-        inner.load_tokenizer(model_path)
+        for name, p in chain(inner.named_parameters(), inner.named_buffers()):
+            if p.is_meta:
+                raise RuntimeError(
+                    f"Unexpected param or buffer {name} on meta device."
+                )
+            if isinstance(p, nn.Parameter):
+                p.requires_grad = False
         inner.eval()
+
+        # --- VAE -------------------------------------------------------
+        vae_cfg = hf_config.get("vae", {}) or {}
+        vae = AutoencoderKLConv3D(
+            in_channels=vae_cfg.get("in_channels", 3),
+            out_channels=vae_cfg.get("out_channels", 3),
+            latent_channels=vae_cfg.get("latent_channels", 32),
+            block_out_channels=tuple(vae_cfg.get("block_out_channels", (128, 256, 512, 1024, 1024))),
+            layers_per_block=vae_cfg.get("layers_per_block", 2),
+            ffactor_spatial=vae_cfg.get("ffactor_spatial", 16),
+            ffactor_temporal=vae_cfg.get("ffactor_temporal", 4),
+            sample_size=vae_cfg.get("sample_size", 384),
+            sample_tsize=vae_cfg.get("sample_tsize", 96),
+            scaling_factor=vae_cfg.get("scaling_factor", None),
+            shift_factor=vae_cfg.get("shift_factor", None),
+            downsample_match_channel=vae_cfg.get("downsample_match_channel", True),
+            upsample_match_channel=vae_cfg.get("upsample_match_channel", True),
+        ).to(dtype=torch.float32)
+        vae_iterator = (
+            (name[len("vae."):], tensor)
+            for name, tensor in safetensors_weights_iterator(
+                safetensors_list,
+                key_filter=lambda n: n.startswith("vae."),
+            )
+        )
+        load_model_from_full_model_state_dict(
+            vae,
+            vae_iterator,
+            device,
+            torch.float32,
+            strict=True,
+            param_names_mapping=get_param_names_mapping({}),
+        )
+        vae.eval()
+        inner.vae = vae
+
+        # --- tokenizer / image processor / generation config ----------
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path, trust_remote_code=True
+        )
+        inner._tokenizer = tokenizer
+        inner.image_processor = HunyuanImage3NativeImageProcessor(config, tokenizer)
+
+        gen_config_path = os.path.join(model_path, "generation_config.json")
+        if os.path.exists(gen_config_path):
+            with open(gen_config_path, "r", encoding="utf-8") as f:
+                gen_config = SimpleNamespace(**json.load(f))
+        else:
+            gen_config = SimpleNamespace()
+        # Defaults the stages / input preparation rely on.
+        for attr, default in (
+            ("max_length", config.max_position_embeddings),
+            ("max_new_tokens", 2048),
+            ("do_sample", True),
+            ("top_k", 1024),
+            ("top_p", 0.95),
+            ("temperature", 0.6),
+            ("sequence_template", "instruct"),
+            ("diff_infer_steps", 50),
+            ("diff_guidance_scale", 2.5),
+            ("flow_shift", 3.0),
+            ("drop_think", False),
+        ):
+            if not hasattr(gen_config, attr):
+                setattr(gen_config, attr, default)
+        inner.generation_config = gen_config
+        inner.model_path = model_path
+
+        total_params = sum(p.numel() for p in inner.parameters())
+        logger.info(
+            "Native HunyuanImage-3.0 loaded: %.2fB backbone params", total_params / 1e9
+        )
         return cls(inner)
 
     # ------------------------------------------------------------------
@@ -120,7 +278,7 @@ class HunyuanImage3ARTransformer(nn.Module):
     # ------------------------------------------------------------------
     @property
     def config(self):
-        return self.inner.config
+        return self._config_view
 
     @property
     def generation_config(self):
@@ -147,19 +305,29 @@ class HunyuanImage3ARTransformer(nn.Module):
         return self.inner.device
 
     # ------------------------------------------------------------------
-    # Generation plumbing (delegates to the official implementation)
+    # Generation plumbing (delegates to the native implementation)
     # ------------------------------------------------------------------
     def resolve_get_system_prompt(self):
-        """Fetch ``get_system_prompt`` from the loaded remote-code package."""
-        import importlib
-        import sys
+        """Load ``get_system_prompt`` from the checkpoint's system_prompt.py.
 
-        module = sys.modules[type(self.inner).__module__]
-        fn = getattr(module, "get_system_prompt", None)
-        if fn is None:
-            sp_module = importlib.import_module(module.__package__ + ".system_prompt")
-            fn = sp_module.get_system_prompt
-        return fn
+        The module is plain text templating with no imports, so loading it
+        directly from the model directory avoids any remote-code dependency
+        beyond the tokenizer.
+        """
+        model_path = getattr(self.inner, "model_path", None)
+        if model_path is None:
+            raise RuntimeError(
+                "model_path is not set; cannot resolve get_system_prompt."
+            )
+        sp_path = os.path.join(model_path, "system_prompt.py")
+        if not os.path.exists(sp_path):
+            raise FileNotFoundError(f"system_prompt.py not found in {model_path}")
+        spec = importlib.util.spec_from_file_location(
+            "hunyuan_image3_system_prompt", sp_path
+        )
+        sp_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sp_module)
+        return sp_module.get_system_prompt
 
     def prepare_model_inputs(self, **kwargs) -> dict[str, Any]:
         """Build model inputs (chat template, tokens, KV cache) for a mode."""
@@ -168,7 +336,7 @@ class HunyuanImage3ARTransformer(nn.Module):
     @torch.no_grad()
     def generate_text(self, **model_inputs) -> torch.Tensor:
         """Run the AR text stage (think / recaption / img_ratio)."""
-        return self.inner.generate(**model_inputs, decode_text=False)
+        return self.inner.generate_text(**model_inputs)
 
     def prepare_denoise_inputs(self, input_ids, model_kwargs, latents, timesteps):
         """Build one denoiser call's inputs, mirroring upstream pipeline."""

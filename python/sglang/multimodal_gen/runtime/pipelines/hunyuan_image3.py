@@ -10,10 +10,12 @@ Pipeline shape: InputValidation -> AR -> Denoise -> Decode
 * Decode stage: ``AutoencoderKLConv3D`` VAE decodes latents to pixels.
 
 The checkpoint (``tencent/HunyuanImage-3.0-Instruct``) is a flat HF repo with
-``trust_remote_code`` model code and sharded safetensors at the root (no
-``model_index.json``), so :meth:`_load_config` synthesizes the module index
-and :meth:`load_modules` loads the official implementation directly, the same
-way upstream ``run_image_gen.py`` does.
+sharded safetensors at the root (no ``model_index.json``), so
+:meth:`_load_config` synthesizes the module index and :meth:`load_modules`
+loads the native sglang implementation (AR MoE backbone + image head +
+``AutoencoderKLConv3D`` VAE) directly from the safetensors; only the official
+tokenizer (chat template / special tokens) is kept from the checkpoint's
+remote code.
 
 Everything is eager PyTorch (SDPA attention, eager MoE; no Triton /
 FlashInfer), so the pipeline runs on both CUDA and NPU.
@@ -92,7 +94,7 @@ class HunyuanImage3Pipeline(ComposedPipelineBase):
         server_args: ServerArgs,
         loaded_modules: dict[str, torch.nn.Module] | None = None,
     ) -> dict[str, Any]:
-        """Load the official HunyuanImage-3.0 model (AR backbone + VAE)."""
+        """Load the native HunyuanImage-3.0 model (AR backbone + VAE)."""
         model_path = maybe_download_model(server_args.model_path)
 
         # Refresh arch config from the checkpoint's root config.json before
@@ -102,17 +104,15 @@ class HunyuanImage3Pipeline(ComposedPipelineBase):
 
         logger.info("Loading HunyuanImage-3.0 from %s", model_path)
 
-        # Loads the remote-code HunyuanImage3ForCausalMM (transformer + VAE +
-        # vision encoder) and binds the tokenizer, exactly like upstream.
-        transformer = HunyuanImage3ARTransformer.from_official_pretrained(
+        # Native AR backbone + image head + VAE streamed from the sharded
+        # safetensors; the official tokenizer is bound for the chat template.
+        transformer = HunyuanImage3ARTransformer.from_native_pretrained(
             model_path,
             server_args=server_args,
         )
 
         components: dict[str, Any] = {
             "transformer": transformer,
-            # Tokenizer and VAE live inside the official model; expose them
-            # under the usual module names for the stages.
             "tokenizer": transformer.tokenizer,
             "vae": transformer.vae,
         }
@@ -141,6 +141,7 @@ class HunyuanImage3Pipeline(ComposedPipelineBase):
             stage=HunyuanImage3DecodeStage(
                 vae=self.get_module("vae"),
                 pipeline=self,
+                vae_scale_factor=server_args.pipeline_config.vae_scale_factor,
             ),
         )
 

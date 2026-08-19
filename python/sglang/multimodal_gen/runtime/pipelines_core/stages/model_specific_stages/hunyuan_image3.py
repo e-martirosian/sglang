@@ -62,9 +62,11 @@ class _FlowMatchDiscreteScheduler:
         self.timesteps_full: torch.Tensor | None = None
 
     def set_timesteps(self, num_inference_steps: int, device: torch.device) -> None:
+        # Mirrors the official FlowMatchDiscreteScheduler.set_timesteps:
+        # linspace(1,0,N+1) gives descending sigmas; SD3 shift is applied;
+        # reverse=True skips the flip, keeping sigmas descending (1→0).
         sigmas = torch.linspace(1, 0, num_inference_steps + 1)
         if self.shift != 1.0:
-            # SD3-style timestep shift.
             sigmas = (self.shift * sigmas) / (1 + (self.shift - 1) * sigmas)
         if not self.reverse:
             sigmas = 1 - sigmas
@@ -461,6 +463,16 @@ class HunyuanImage3DenoiseStage(PipelineStage):
 
         # Compute post_token_len and num_special_tokens from model_inputs,
         # mirroring the upstream generate() method logic.
+        # IMPORTANT: these must be set on the OUTER HunyuanImage3ForCausalMM
+        # wrapper (``self.transformer.inner``), NOT on the inner
+        # HunyuanImage3Model, because:
+        #  - ragged_final_layer() reads self.num_special_tokens on the outer
+        #  - forward() passes self.post_token_len / self.num_image_tokens /
+        #    self.num_special_tokens from its own attributes to the inner model
+        # Setting them on the inner model has no effect — the outer model's
+        # attributes stay None, causing hidden_states[:, None:, :] to silently
+        # become hidden_states[:, 0:, :] (all tokens including specials),
+        # producing garbage diffusion predictions → white images.
         post_token_len = self.transformer.compute_post_token_len(model_inputs)
         num_special_tokens = self.transformer.compute_num_special_tokens(model_inputs)
         self.transformer.inner.post_token_len = post_token_len
@@ -469,9 +481,7 @@ class HunyuanImage3DenoiseStage(PipelineStage):
         # Also set num_image_tokens from batch_gen_image_info if available
         batch_gen_image_info = model_kwargs.get("batch_gen_image_info")
         if batch_gen_image_info and len(batch_gen_image_info) > 0:
-            self.transformer.inner.num_image_tokens = (
-                batch_gen_image_info[0].image_token_length
-            )
+            self.transformer.inner.num_image_tokens = batch_gen_image_info[0].image_token_length
 
         logger.info(
             "HunyuanImage-3.0 denoising: %s steps, guidance %.2f, flow_shift %.2f, "
@@ -543,16 +553,18 @@ class HunyuanImage3DenoiseStage(PipelineStage):
 class HunyuanImage3DecodeStage(PipelineStage):
     """Decode HunyuanImage-3.0 latents to pixels with AutoencoderKLConv3D.
 
-    Mirrors the upstream post-loop handling: un-scale by the VAE scaling
-    factor, add the temporal dim expected by the 3D conv VAE, decode under
-    fp16 autocast, and normalize to [0, 1].
+    Uses sglang's ``VaeImageProcessor`` (from diffusers) for the final
+    postprocessing step, matching the pattern used by other sglang image
+    pipelines (GLM, Qwen, Flux).  This replaces the official model's
+    ``postprocess_outputs`` which has a bug when ``batch_cond_images`` is
+    ``None`` (T2I mode).
     """
 
-    def __init__(self, vae, pipeline=None) -> None:
+    def __init__(self, vae, pipeline=None, vae_scale_factor: int = 16) -> None:
         super().__init__()
         self.vae = vae
         self.pipeline = pipeline
-        self.image_processor = VaeImageProcessor(vae_scale_factor=16)
+        self.image_processor = VaeImageProcessor(vae_scale_factor=vae_scale_factor)
 
     @property
     def parallelism_type(self) -> StageParallelismType:
@@ -587,8 +599,14 @@ class HunyuanImage3DecodeStage(PipelineStage):
             )
             frames = frames.squeeze(2)
 
-        # VAE output is [-1, 1]; normalize to [0, 1] like upstream denormalize.
-        frames = (frames / 2 + 0.5).clamp(0, 1)
+        # Use sglang's VaeImageProcessor for denormalization + output
+        # formatting (same component used by GLM / Qwen / Flux pipelines).
+        # This replaces the official model's postprocess_outputs which
+        # crashes on batch_cond_images=None (T2I mode).
+        do_denormalize = [True] * frames.shape[0]
+        frames = self.image_processor.postprocess(
+            frames, output_type="pt", do_denormalize=do_denormalize
+        )
         frames = server_args.pipeline_config.post_decoding(frames, server_args)
 
         return OutputBatch(

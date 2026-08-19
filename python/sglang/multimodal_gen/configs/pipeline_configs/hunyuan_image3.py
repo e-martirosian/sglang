@@ -74,6 +74,16 @@ class HunyuanImage3PipelineConfig(SpatialImagePipelineConfig):
     def __post_init__(self):
         self.vae_scale_factor = self.vae_config.get_vae_scale_factor()
 
+    def post_decoding(self, frames, server_args):
+        """HunyuanImage-3.0 post-decoding.
+
+        The decode stage already handles denormalization via sglang's
+        ``VaeImageProcessor``, so this is a pass-through.  The official
+        model's ``postprocess_outputs`` (conditional-image compositing) is
+        not needed for T2I and is intentionally not called.
+        """
+        return frames
+
     def get_model_deployment_config(self):
         """Deployment hints for auto-parallelism decisions.
 
