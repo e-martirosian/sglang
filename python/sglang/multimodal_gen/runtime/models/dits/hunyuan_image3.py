@@ -89,7 +89,7 @@ def _load_official_tokenizer(model_path: str):
         raise FileNotFoundError(
             f"tokenization_hunyuan_image_3.py not found in {model_path}"
         )
-    module_name = "hunyuan_image3_tokenization"
+    module_name = "tokenization_hunyuan_image_3"
     tk_module = sys.modules.get(module_name)
     if tk_module is None:
         spec = importlib.util.spec_from_file_location(module_name, tk_path)

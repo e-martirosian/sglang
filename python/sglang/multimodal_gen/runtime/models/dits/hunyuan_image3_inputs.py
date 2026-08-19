@@ -64,8 +64,11 @@ def get_tokenization_module(tokenizer=None):
     so scan for it directly.
     """
     for module in sys.modules.values():
-        if module is not None and getattr(module, "__name__", "").endswith(
-            "tokenization_hunyuan_image_3"
+        if module is None:
+            continue
+        name = getattr(module, "__name__", "") or ""
+        if "tokenization_hunyuan_image_3" in name and (
+            hasattr(module, "ImageInfo") and hasattr(module, "Resolution")
         ):
             return module
     raise RuntimeError(
