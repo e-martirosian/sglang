@@ -486,48 +486,55 @@ class HunyuanImage3DenoiseStage(PipelineStage):
             num_special_tokens,
         )
 
-        for i, t in enumerate(timesteps):
-            latent_model_input = torch.cat([latents] * cfg_factor)
+        with self.progress_bar(
+            total=num_inference_steps,
+            batch=batch,
+            desc="HunyuanImage-3.0 denoising",
+        ) as progress_bar:
+            for i, t in enumerate(timesteps):
+                latent_model_input = torch.cat([latents] * cfg_factor)
 
-            if meanflow:
-                r = scheduler.get_timestep_r(i)
-                r_expand = r.repeat(latent_model_input.shape[0])
-            else:
-                r_expand = None
-            model_kwargs["timesteps_r"] = r_expand
+                if meanflow:
+                    r = scheduler.get_timestep_r(i)
+                    r_expand = r.repeat(latent_model_input.shape[0])
+                else:
+                    r_expand = None
+                model_kwargs["timesteps_r"] = r_expand
 
-            t_expand = t.repeat(latent_model_input.shape[0])
+                t_expand = t.repeat(latent_model_input.shape[0])
 
-            if cfg_distilled:
-                model_kwargs["guidance"] = torch.tensor(
-                    [1000.0 * guidance_scale], device=device, dtype=torch.bfloat16
+                if cfg_distilled:
+                    model_kwargs["guidance"] = torch.tensor(
+                        [1000.0 * guidance_scale], device=device, dtype=torch.bfloat16
+                    )
+
+                denoise_inputs = self.transformer.prepare_denoise_inputs(
+                    input_ids, model_kwargs, latent_model_input, t_expand
                 )
 
-            denoise_inputs = self.transformer.prepare_denoise_inputs(
-                input_ids, model_kwargs, latent_model_input, t_expand
-            )
+                model_output = self.transformer.denoise_forward(
+                    denoise_inputs, first_step=(i == 0)
+                )
+                pred = model_output["diffusion_prediction"].to(dtype=torch.float32)
 
-            model_output = self.transformer.denoise_forward(
-                denoise_inputs, first_step=(i == 0)
-            )
-            pred = model_output["diffusion_prediction"].to(dtype=torch.float32)
+                if do_cfg and not cfg_distilled:
+                    pred_cond, pred_uncond = pred.chunk(2)
+                    # Upstream ClassifierFreeGuidance (non-original formulation):
+                    # pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+                    pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
 
-            if do_cfg and not cfg_distilled:
-                pred_cond, pred_uncond = pred.chunk(2)
-                # Upstream ClassifierFreeGuidance (non-original formulation):
-                # pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
-                pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+                # Euler step on the flow-matching trajectory.
+                sigma = scheduler.sigmas[i]
+                sigma_next = scheduler.sigmas[i + 1]
+                latents = (
+                    latents.to(torch.float32) + pred * (sigma_next - sigma)
+                ).to(torch.bfloat16)
 
-            # Euler step on the flow-matching trajectory.
-            sigma = scheduler.sigmas[i]
-            sigma_next = scheduler.sigmas[i + 1]
-            latents = (
-                latents.to(torch.float32) + pred * (sigma_next - sigma)
-            ).to(torch.bfloat16)
+                if i != len(timesteps) - 1:
+                    model_kwargs = self.transformer.update_denoise_kwargs(model_output, model_kwargs)
+                    input_ids = None
 
-            if i != len(timesteps) - 1:
-                model_kwargs = self.transformer.update_denoise_kwargs(model_output, model_kwargs)
-                input_ids = None
+                progress_bar.update()
 
         batch.latents = latents.to(torch.float32)
         return batch
