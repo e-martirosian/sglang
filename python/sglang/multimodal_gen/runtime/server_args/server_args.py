@@ -412,6 +412,11 @@ class ServerArgs(DisaggServerArgsMixin):
     # Prompt text file for batch processing
     prompt_file_path: str | None = None
 
+    # Model-specific task routing override (e.g. HunyuanImage-3.0:
+    # "image" | "think" | "recaption" | "think_recaption").
+    # When set, overrides the checkpoint's generation_config default.
+    bot_task: str | None = None
+
     # model paths for correct deallocation
     model_paths: dict[str, str] = field(default_factory=dict)
     model_loaded: dict[str, bool] = field(
@@ -1759,6 +1764,18 @@ class ServerArgs(DisaggServerArgsMixin):
             type=str,
             default=ServerArgs.prompt_file_path,
             help="Path to a text file containing prompts (one per line) for batch processing",
+        )
+
+        parser.add_argument(
+            "--bot-task",
+            type=str,
+            default=ServerArgs.bot_task,
+            choices=["image", "think", "recaption", "think_recaption"],
+            help=(
+                "Override the model's default bot_task (task routing). "
+                "'image' skips text enhancement for fastest generation. "
+                "Currently used by HunyuanImage-3.0."
+            ),
         )
 
         parser.add_argument(

@@ -312,6 +312,8 @@ async def generations(
                 request, "use_resolution_template"
             ),
             use_system_prompt=_get_extra_field(request, "use_system_prompt"),
+            bot_task=_get_extra_field(request, "bot_task"),
+            system_prompt=_get_extra_field(request, "system_prompt"),
             use_guardrails=_get_extra_field(request, "use_guardrails"),
             enable_teacache=request.enable_teacache,
             quality=_runtime_sampling_quality(request.quality),

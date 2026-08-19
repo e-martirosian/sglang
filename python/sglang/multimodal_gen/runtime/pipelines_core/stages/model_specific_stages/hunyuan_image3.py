@@ -93,17 +93,24 @@ class HunyuanImage3ARStage(PipelineStage):
         # inside the single process, so every rank runs the same AR stage.
         return StageParallelismType.REPLICATED
 
-    def _resolve_task_params(self, batch: Req):
-        """Resolve bot_task / use_system_prompt like upstream generate_image."""
+    def _resolve_task_params(self, batch: Req, server_args: ServerArgs):
+        """Resolve bot_task / use_system_prompt like upstream generate_image.
+
+        Priority: sampling_params (per-request) > server_args (CLI) > generation_config (model default).
+        """
         model = self.transformer
         sampling_params = batch.sampling_params
         gen_config = model.generation_config
 
-        use_system_prompt = getattr(
-            sampling_params, "use_system_prompt", None
-        ) or getattr(gen_config, "use_system_prompt", None)
-        bot_task = getattr(sampling_params, "bot_task", None) or getattr(
-            gen_config, "bot_task", "image"
+        use_system_prompt = (
+            getattr(sampling_params, "use_system_prompt", None)
+            or getattr(server_args, "use_system_prompt", None)
+            or getattr(gen_config, "use_system_prompt", None)
+        )
+        bot_task = (
+            getattr(sampling_params, "bot_task", None)
+            or getattr(server_args, "bot_task", None)
+            or getattr(gen_config, "bot_task", "image")
         )
         custom_system_prompt = getattr(sampling_params, "system_prompt", None)
 
@@ -131,7 +138,7 @@ class HunyuanImage3ARStage(PipelineStage):
                 )
             prompt = prompt[0]
 
-        bot_task, system_prompt = self._resolve_task_params(batch)
+        bot_task, system_prompt = self._resolve_task_params(batch, server_args)
         image_size = self._resolve_image_size(batch)
         need_ratio = image_size == "auto" or bot_task == "img_ratio"
         max_new_tokens = getattr(sampling_params, "max_new_tokens", 2048)
