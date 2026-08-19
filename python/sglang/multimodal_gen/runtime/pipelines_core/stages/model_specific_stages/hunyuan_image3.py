@@ -81,14 +81,6 @@ class _FlowMatchDiscreteScheduler:
 
 
 class HunyuanImage3ARStage(PipelineStage):
-    """Build the autoregressive context for HunyuanImage-3.0 image generation.
-
-    Replicates upstream ``generate_image`` up to the final
-    ``prepare_model_inputs(mode="gen_image")`` call: system-prompt
-    resolution, optional think/recaption AR stage, optional image-ratio
-    prediction, and the gen_image input construction. The resulting
-    ``model_inputs`` dict is stored on the batch for the denoising stage.
-    """
 
     def __init__(self, transformer, pipeline=None) -> None:
         super().__init__()
@@ -289,7 +281,7 @@ class HunyuanImage3ARStage(PipelineStage):
             model_inputs["final_stop_tokens"] = final_stop_tokens
         if logits_processor is not None:
             model_inputs["logits_processor"] = logits_processor
-
+       
         outputs = model.generate_text(**model_inputs)
         generated_tokens = outputs[:, input_length:]
 
@@ -411,7 +403,7 @@ class HunyuanImage3DenoiseStage(PipelineStage):
 
     @torch.no_grad()
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
-        model = self.transformer
+        model = self.transformer.inner.model
         sampling_params = batch.sampling_params
         device = get_local_torch_device()
 
@@ -427,7 +419,7 @@ class HunyuanImage3DenoiseStage(PipelineStage):
                 "(got 'auto' without a ratio stage)."
             )
 
-        gen_config = model.generation_config
+        gen_config = self.transformer.generation_config
         num_inference_steps = int(
             sampling_params.num_inference_steps
             or getattr(gen_config, "diff_infer_steps", 50)
@@ -452,7 +444,7 @@ class HunyuanImage3DenoiseStage(PipelineStage):
         model_kwargs = dict(model_inputs)
         generator = model_kwargs.get("generator")
         input_ids = model_kwargs.pop("input_ids")
-        attention_mask = model.prepare_attention_mask(input_ids, model_kwargs)
+        attention_mask = self.transformer.prepare_attention_mask(input_ids, model_kwargs)
         model_kwargs["attention_mask"] = attention_mask.to(device)
 
         latents = self._prepare_latents(batch, image_size, device, generator)
@@ -466,6 +458,10 @@ class HunyuanImage3DenoiseStage(PipelineStage):
             cfg_distilled,
             tuple(latents.shape),
         )
+
+
+        self.transformer.inner.post_token_len = 0 #model_inputs["input_ids"].shape[1]
+        self.transformer.inner.num_special_tokens = 1
 
         for i, t in enumerate(timesteps):
             latent_model_input = torch.cat([latents] * cfg_factor)
@@ -484,10 +480,18 @@ class HunyuanImage3DenoiseStage(PipelineStage):
                     [1000.0 * guidance_scale], device=device, dtype=torch.bfloat16
                 )
 
-            denoise_inputs = model.prepare_denoise_inputs(
+            denoise_inputs = self.transformer.prepare_denoise_inputs(
                 input_ids, model_kwargs, latent_model_input, t_expand
             )
-            model_output = model.denoise_forward(denoise_inputs, first_step=(i == 0))
+            # indices = torch.where(denoise_inputs['tokenizer_output'].tokens[0] == self.transformer.inner._tokenizer.encode("<img>")[0])[0]
+            # if indices.shape[0] > 0:
+            #     last_idx = indices[-1]
+            #     self.transformer.inner.post_token_len = int(denoise_inputs['tokenizer_output'].tokens[0].shape[0] - 1 - last_idx)
+            # else:
+            #     self.transformer.inner.post_token_len = None
+            # self.transformer.inner.post_token_len = model_inputs["input_ids"].shape[1]
+
+            model_output = self.transformer.forward(**denoise_inputs, first_step=(i == 0))
             pred = model_output["diffusion_prediction"].to(dtype=torch.float32)
 
             if do_cfg and not cfg_distilled:
@@ -504,7 +508,7 @@ class HunyuanImage3DenoiseStage(PipelineStage):
             ).to(torch.bfloat16)
 
             if i != len(timesteps) - 1:
-                model_kwargs = model.update_denoise_kwargs(model_output, model_kwargs)
+                model_kwargs = self.transformer.update_denoise_kwargs(model_output, model_kwargs)
                 input_ids = None
 
         batch.latents = latents.to(torch.float32)

@@ -88,7 +88,7 @@ class HunyuanImage3ARTransformer(nn.Module):
         kwargs = dict(
             attn_implementation=attn_implementation,
             trust_remote_code=True,
-            torch_dtype=torch_dtype,
+            dtype=torch_dtype,
             device_map="auto",
             moe_impl=moe_impl,
             moe_drop_tokens=True,
@@ -122,7 +122,7 @@ class HunyuanImage3ARTransformer(nn.Module):
 
     @property
     def tokenizer(self):
-        return self.inner.tokenizer
+        return self.inner._tokenizer
 
     @property
     def image_processor(self):

@@ -36,9 +36,6 @@ from sglang.multimodal_gen.runtime.models.dits.hunyuan_image3 import (
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
     ComposedPipelineBase,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.stages import (
-    InputValidationStage,
-)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.hunyuan_image3 import (
     HunyuanImage3ARStage,
     HunyuanImage3DecodeStage,
@@ -97,15 +94,13 @@ class HunyuanImage3Pipeline(ComposedPipelineBase):
     ) -> dict[str, Any]:
         """Load the official HunyuanImage-3.0 model (AR backbone + VAE)."""
         model_path = maybe_download_model(server_args.model_path)
-        self.model_path = model_path
-        logger.info("Loading HunyuanImage-3.0 from %s", model_path)
 
-        self._update_dit_config_from_checkpoint(server_args, model_path)
+        logger.info("Loading HunyuanImage-3.0 from %s", model_path)
 
         # Loads the remote-code HunyuanImage3ForCausalMM (transformer + VAE +
         # vision encoder) and binds the tokenizer, exactly like upstream.
         transformer = HunyuanImage3ARTransformer.from_official_pretrained(
-            model_path
+            model_path,
         )
 
         components: dict[str, Any] = {
@@ -121,10 +116,6 @@ class HunyuanImage3Pipeline(ComposedPipelineBase):
 
     # Pipeline lifecycle
     def create_pipeline_stages(self, server_args: ServerArgs):
-        self.add_stage(
-            stage_name="input_validation",
-            stage=InputValidationStage(),
-        )
         self.add_stage(
             stage_name="hunyuan_image3_ar",
             stage=HunyuanImage3ARStage(
