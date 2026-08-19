@@ -51,7 +51,8 @@ class HunyuanImage3ARTransformer(nn.Module):
         self.hidden_size = getattr(config, "hidden_size", 4096)
         self.num_attention_heads = getattr(config, "num_attention_heads", 32)
         self.num_channels_latents = config.vae.get("latent_channels", 32)
-        self.vae_scale_factor = config.vae_downsample_factor
+        vae_ds = config.vae_downsample_factor
+        self.vae_scale_factor = vae_ds if isinstance(vae_ds, int) else vae_ds[0]
 
     # ------------------------------------------------------------------
     # Loading
@@ -60,6 +61,7 @@ class HunyuanImage3ARTransformer(nn.Module):
     def from_official_pretrained(
         cls,
         model_path: str,
+        server_args: Any = None,
         attn_implementation: str = "sdpa",
         moe_impl: str = "eager",
         torch_dtype: Any = torch.bfloat16,
@@ -85,19 +87,27 @@ class HunyuanImage3ARTransformer(nn.Module):
                 model_path,
             )
 
+        # Determine device_map.  For NPU (and single-GPU CUDA) we still use
+        # "auto" so that transformers shards the 80B weights across all visible
+        # devices.  When the caller passes an explicit num_gpus > 1 via
+        # server_args we honour it; otherwise transformers auto-detects.
+        device_map = "auto"
+
         kwargs = dict(
             attn_implementation=attn_implementation,
             trust_remote_code=True,
             dtype=torch_dtype,
-            device_map="auto",
+            device_map=device_map,
             moe_impl=moe_impl,
             moe_drop_tokens=True,
         )
         logger.info(
-            "Loading official HunyuanImage-3.0 model from %s (attn=%s, moe=%s)",
+            "Loading official HunyuanImage-3.0 model from %s "
+            "(attn=%s, moe=%s, device_map=%s)",
             model_path,
             attn_implementation,
             moe_impl,
+            device_map,
         )
         inner = AutoModelForCausalLM.from_pretrained(model_path, **kwargs)
         # Upstream binds the HunyuanImage3TokenizerFast this way.
@@ -189,6 +199,49 @@ class HunyuanImage3ARTransformer(nn.Module):
         return self.inner._prepare_attention_mask_for_generation(
             input_ids, self.inner.generation_config, model_kwargs=model_kwargs
         )
+
+    def compute_post_token_len(self, model_inputs: dict[str, Any]) -> int | None:
+        """Compute ``post_token_len`` from the tokenizer output.
+
+        Mirrors the logic in the upstream ``generate()`` method: count the
+        number of tokens after the last ``<img>`` token in the sequence.
+        """
+        tokenizer_output = model_inputs.get("tokenizer_output")
+        if tokenizer_output is None:
+            return None
+        tokens = tokenizer_output.tokens[0]
+        img_token_id = self.inner._tokenizer.encode("<img>")[0]
+        indices = torch.where(tokens == img_token_id)[0]
+        if indices.shape[0] > 0:
+            last_idx = indices[-1]
+            return int(tokens.shape[0] - 1 - last_idx)
+        return None
+
+    def compute_num_special_tokens(self, model_inputs: dict[str, Any]) -> int:
+        """Compute ``num_special_tokens`` from batch_gen_image_info.
+
+        Counts the special tokens inserted for the denoiser: timestep,
+        guidance (cfg_distilled), and timestep_r (meanflow).
+        """
+        batch_gen_image_info = model_inputs.get("batch_gen_image_info")
+        if batch_gen_image_info and len(batch_gen_image_info) > 0:
+            info = batch_gen_image_info[0]
+            count = 0
+            if getattr(info, "add_timestep_token", False):
+                count += 1
+            if getattr(info, "add_guidance_token", False):
+                count += 1
+            if getattr(info, "add_timestep_r_token", False):
+                count += 1
+            return count
+        # Fallback: check model config for what tokens are expected
+        config = self.inner.config
+        count = 1  # timestep token is always present
+        if getattr(config, "cfg_distilled", False):
+            count += 1
+        if getattr(config, "use_meanflow", False):
+            count += 1
+        return count
 
     def forward(self, *args, **kwargs):
         """BaseDiT-compatible passthrough (used only for diagnostics)."""

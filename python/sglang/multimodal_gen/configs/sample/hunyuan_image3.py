@@ -7,6 +7,7 @@ flow shift 3.0. Defaults mirror the checkpoint's ``generation_config.json``.
 """
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 from sglang.multimodal_gen.configs.sample.sampling_params import SamplingParams
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
@@ -47,6 +48,11 @@ class HunyuanImage3SamplingParams(SamplingParams):
     use_system_prompt: str | None = None
     # Custom system prompt text (only with use_system_prompt="custom").
     system_prompt: str | None = None
+
+    # Default resolution (1024x1024) to avoid the auto-ratio prediction
+    # stage which requires an extra AR forward pass.
+    _default_height: ClassVar[int | None] = 1024
+    _default_width: ClassVar[int | None] = 1024
 
     def _adjust(self, server_args):
         requested_width = self.width

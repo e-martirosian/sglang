@@ -89,8 +89,9 @@ class HunyuanImage3ARStage(PipelineStage):
 
     @property
     def parallelism_type(self) -> StageParallelismType:
-        # AR context building is sequential; run on the main rank and broadcast.
-        return StageParallelismType.MAIN_RANK_ONLY_AND_SEND_TO_OTHERS
+        # The model is sharded across all visible devices via device_map="auto"
+        # inside the single process, so every rank runs the same AR stage.
+        return StageParallelismType.REPLICATED
 
     def _resolve_task_params(self, batch: Req):
         """Resolve bot_task / use_system_prompt like upstream generate_image."""
@@ -375,8 +376,10 @@ class HunyuanImage3DenoiseStage(PipelineStage):
 
     @property
     def parallelism_type(self) -> StageParallelismType:
-        # CFG batching is handled inside the model's own input preparation.
-        return StageParallelismType.MAIN_RANK_ONLY_AND_SEND_TO_OTHERS
+        # The model is sharded across all visible devices via device_map="auto"
+        # inside the single process, so every rank runs the same denoising
+        # loop on the same shard.
+        return StageParallelismType.REPLICATED
 
     def _prepare_latents(
         self,
@@ -449,19 +452,32 @@ class HunyuanImage3DenoiseStage(PipelineStage):
 
         latents = self._prepare_latents(batch, image_size, device, generator)
 
+        # Compute post_token_len and num_special_tokens from model_inputs,
+        # mirroring the upstream generate() method logic.
+        post_token_len = self.transformer.compute_post_token_len(model_inputs)
+        num_special_tokens = self.transformer.compute_num_special_tokens(model_inputs)
+        self.transformer.inner.post_token_len = post_token_len
+        self.transformer.inner.num_special_tokens = num_special_tokens
+
+        # Also set num_image_tokens from batch_gen_image_info if available
+        batch_gen_image_info = model_kwargs.get("batch_gen_image_info")
+        if batch_gen_image_info and len(batch_gen_image_info) > 0:
+            self.transformer.inner.num_image_tokens = (
+                batch_gen_image_info[0].image_token_length
+            )
+
         logger.info(
             "HunyuanImage-3.0 denoising: %s steps, guidance %.2f, flow_shift %.2f, "
-            "cfg_distilled=%s, latent_shape=%s",
+            "cfg_distilled=%s, latent_shape=%s, post_token_len=%s, "
+            "num_special_tokens=%s",
             num_inference_steps,
             guidance_scale,
             flow_shift,
             cfg_distilled,
             tuple(latents.shape),
+            post_token_len,
+            num_special_tokens,
         )
-
-
-        self.transformer.inner.post_token_len = 0 #model_inputs["input_ids"].shape[1]
-        self.transformer.inner.num_special_tokens = 1
 
         for i, t in enumerate(timesteps):
             latent_model_input = torch.cat([latents] * cfg_factor)
@@ -483,15 +499,10 @@ class HunyuanImage3DenoiseStage(PipelineStage):
             denoise_inputs = self.transformer.prepare_denoise_inputs(
                 input_ids, model_kwargs, latent_model_input, t_expand
             )
-            # indices = torch.where(denoise_inputs['tokenizer_output'].tokens[0] == self.transformer.inner._tokenizer.encode("<img>")[0])[0]
-            # if indices.shape[0] > 0:
-            #     last_idx = indices[-1]
-            #     self.transformer.inner.post_token_len = int(denoise_inputs['tokenizer_output'].tokens[0].shape[0] - 1 - last_idx)
-            # else:
-            #     self.transformer.inner.post_token_len = None
-            # self.transformer.inner.post_token_len = model_inputs["input_ids"].shape[1]
 
-            model_output = self.transformer.forward(**denoise_inputs, first_step=(i == 0))
+            model_output = self.transformer.denoise_forward(
+                denoise_inputs, first_step=(i == 0)
+            )
             pred = model_output["diffusion_prediction"].to(dtype=torch.float32)
 
             if do_cfg and not cfg_distilled:
