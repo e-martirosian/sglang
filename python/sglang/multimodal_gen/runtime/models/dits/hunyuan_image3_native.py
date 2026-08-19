@@ -508,6 +508,22 @@ class UNetUp(nn.Module):
 # =======================================================
 
 
+def _rms_norm_fp32(norm: RMSNorm, x: torch.Tensor) -> torch.Tensor:
+    """RMSNorm with fp32 accumulate and input-dtype output.
+
+    Mirrors the official HF ``RMSNorm`` (fp32 variance computation, result
+    cast back to the input dtype).  A pure elementwise implementation is
+    used because the NPU ``aclnnRmsNorm`` kernel rejects mixed x/weight
+    dtypes (e.g. fp32 activations with bf16 weights, which happen after the
+    fp32 RoPE promotion).
+    """
+    orig_dtype = x.dtype
+    x32 = x.float()
+    variance = x32.pow(2).mean(dim=-1, keepdim=True)
+    x32 = x32 * torch.rsqrt(variance + norm.variance_epsilon)
+    return (x32 * norm.weight.float()).to(orig_dtype)
+
+
 class HunyuanMLP(nn.Module):
     """SwiGLU MLP; also used for MoE experts and the shared expert."""
 
@@ -718,12 +734,16 @@ class HunyuanImage3SDPAAttention(nn.Module):
             # RoPE is applied before qk_norm, matching the official model
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        if self.use_qk_norm:
-            query_states = self.query_layernorm(query_states)
-            key_states = self.key_layernorm(key_states)
-
+        # The fp32 RoPE cos/sin above promotes q/k to fp32; bring them back
+        # to the activation dtype first: the NPU rms_norm kernel requires
+        # matching x/weight dtypes, and the official qk-norm semantics are
+        # "compute in fp32, return the input dtype" (see _rms_norm_fp32).
         query_states = query_states.to(value_states.dtype)
         key_states = key_states.to(value_states.dtype)
+
+        if self.use_qk_norm:
+            query_states = _rms_norm_fp32(self.query_layernorm, query_states)
+            key_states = _rms_norm_fp32(self.key_layernorm, key_states)
 
         if past_key_value is not None:
             cache_kwargs = {"cache_position": position_ids}
@@ -795,7 +815,7 @@ class HunyuanImage3DecoderLayer(nn.Module):
         hidden_states = residual + hidden_states
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = _rms_norm_fp32(self.post_attention_layernorm, hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
