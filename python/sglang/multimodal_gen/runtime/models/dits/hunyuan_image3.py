@@ -70,6 +70,36 @@ logger = init_logger(__name__)
 _is_npu = current_platform.is_npu()
 
 
+def _load_official_tokenizer(model_path: str):
+    """Instantiate the official ``HunyuanImage3TokenizerFast``.
+
+    ``AutoTokenizer.from_pretrained`` cannot be used: the checkpoint's
+    ``tokenizer_config.json`` declares ``tokenizer_class =
+    PreTrainedTokenizerFast`` with no ``auto_map``, so AutoTokenizer would
+    return the generic fast tokenizer instead of the custom class (which
+    defines ``Resolution`` / ``ImageInfo`` / the gen-image chat template).
+    Load ``tokenization_hunyuan_image_3.py`` from the model directory
+    directly and register it in ``sys.modules`` so the native input
+    preparation can resolve the module's classes.
+    """
+    import sys
+
+    tk_path = os.path.join(model_path, "tokenization_hunyuan_image_3.py")
+    if not os.path.exists(tk_path):
+        raise FileNotFoundError(
+            f"tokenization_hunyuan_image_3.py not found in {model_path}"
+        )
+    module_name = "hunyuan_image3_tokenization"
+    tk_module = sys.modules.get(module_name)
+    if tk_module is None:
+        spec = importlib.util.spec_from_file_location(module_name, tk_path)
+        tk_module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = tk_module
+        spec.loader.exec_module(tk_module)
+    tokenizer_cls = tk_module.HunyuanImage3TokenizerFast
+    return tokenizer_cls.from_pretrained(model_path)
+
+
 class _NativeConfigView:
     """Official-config-compatible view over the native config dataclass.
 
@@ -234,11 +264,7 @@ class HunyuanImage3ARTransformer(nn.Module):
         inner.vae = vae
 
         # --- tokenizer / image processor / generation config ----------
-        from transformers import AutoTokenizer
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True
-        )
+        tokenizer = _load_official_tokenizer(model_path)
         inner._tokenizer = tokenizer
         inner.image_processor = HunyuanImage3NativeImageProcessor(config, tokenizer)
 

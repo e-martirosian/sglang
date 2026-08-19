@@ -51,16 +51,28 @@ def to_device(x, device):
     return x
 
 
-def get_tokenization_module(tokenizer):
-    """Reach the official tokenization module the tokenizer was loaded from
-    (``transformers_modules.<...>.tokenization_hunyuan_image_3``)."""
-    module_name = type(tokenizer).__module__
-    if module_name not in sys.modules:
-        raise RuntimeError(
-            f"Tokenization module {module_name!r} is not loaded; the native "
-            "input preparation requires the official HunyuanImage-3 tokenizer."
-        )
-    return sys.modules[module_name]
+def get_tokenization_module(tokenizer=None):
+    """Locate the official tokenization module
+    (``transformers_modules.<...>.tokenization_hunyuan_image_3``).
+
+    ``type(tokenizer).__module__`` cannot be trusted: depending on the
+    transformers version the tokenizer class resolves to an internal
+    transformers module (e.g. ``tokenization_utils_tokenizers``) that does
+    not define ``Resolution`` / ``ImageInfo``.  The official module is
+    registered in ``sys.modules`` by the adapter's
+    ``_load_official_tokenizer`` (and by transformers' remote-code loading),
+    so scan for it directly.
+    """
+    for module in sys.modules.values():
+        if module is not None and getattr(module, "__name__", "").endswith(
+            "tokenization_hunyuan_image_3"
+        ):
+            return module
+    raise RuntimeError(
+        "The official HunyuanImage-3 tokenization module is not loaded; the "
+        "native input preparation requires the official tokenizer to be "
+        "loaded with trust_remote_code=True."
+    )
 
 
 # =======================================================
@@ -201,6 +213,7 @@ class HunyuanImage3NativeImageProcessor:
     """
 
     def __init__(self, config, tokenizer) -> None:
+        self._tokenizer_ref = tokenizer
         tk_module = get_tokenization_module(tokenizer)
         Resolution = tk_module.Resolution
         ResolutionGroup = tk_module.ResolutionGroup
@@ -289,17 +302,9 @@ class HunyuanImage3NativeImageProcessor:
 
     def _image_info_cls(self):
         # The tokenizer asserts isinstance(info, ImageInfo) with *its own*
-        # ImageInfo class, so resolve the class lazily from any loaded
+        # ImageInfo class, so resolve the class lazily from the loaded
         # official tokenization module.
-        for module in sys.modules.values():
-            if module is not None and getattr(module, "__name__", "").endswith(
-                "tokenization_hunyuan_image_3"
-            ):
-                return module.ImageInfo
-        raise RuntimeError(
-            "The official HunyuanImage-3 tokenization module is not loaded; "
-            "cannot construct ImageInfo."
-        )
+        return get_tokenization_module(self._tokenizer_ref).ImageInfo
 
     def prepare_full_attn_slices(self, output, batch_idx=None, with_gen=True):
         """Determine full-attention image slices according to the strategies.
