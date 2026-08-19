@@ -701,7 +701,10 @@ class HunyuanImage3InputPreparationMixin:
 
         #   -- seed
         seeds = self.prepare_seed(seed=kwargs.get("seed"), batch_size=batch_size)
-        generator = [torch.Generator(self.device).manual_seed(seed) for seed in seeds]
+        # CPU generators: torch_npu random kernels (rand/randn/multinomial)
+        # do not support device-side generators; random draws are done on
+        # CPU and moved to the device afterwards.
+        generator = [torch.Generator("cpu").manual_seed(seed) for seed in seeds]
 
         # 4. Conditional images are not supported (T2I only), nothing to encode.
 
@@ -1007,21 +1010,21 @@ class HunyuanImage3InputPreparationMixin:
             logits = logits.masked_fill(indices_to_remove, float("-inf"))
 
         probs = F.softmax(logits.float(), dim=-1)
-        probs = probs.float()
 
-        # Gumbel(0, 1)
-        uniform = torch.rand(
-            probs.shape,
-            device=probs.device,
-            dtype=torch.float32,
-            generator=generator,
-        )
+        # Gumbel-max sampling (equivalent to multinomial).  ``multinomial``
+        # and device generators are unsupported by the NPU kernels, so draw
+        # the uniforms on CPU when a (CPU) generator is given.
+        if generator is not None:
+            uniform = torch.rand(
+                probs.shape, device="cpu", dtype=torch.float32, generator=generator
+            ).to(probs.device)
+        else:
+            uniform = torch.rand(probs.shape, device=probs.device, dtype=torch.float32)
 
         gumbel = -torch.log(-torch.log(uniform.clamp_min(1e-20)))
 
         samples = torch.argmax(torch.log(probs.clamp_min(1e-20)) + gumbel, dim=-1)
-        #samples = torch.multinomial(probs, num_samples=1, generator=generator)
-        return samples.squeeze(-1).to(logits.device)
+        return samples.to(logits.device)
 
     @torch.no_grad()
     def generate_text(

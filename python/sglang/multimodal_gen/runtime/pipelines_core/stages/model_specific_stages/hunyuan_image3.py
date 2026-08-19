@@ -409,9 +409,13 @@ class HunyuanImage3DenoiseStage(PipelineStage):
         shape = (1, latent_channels, height // factor_h, width // factor_w)
         if isinstance(generator, (list, tuple)):
             generator = generator[0] if generator else None
-        return torch.randn(
-            shape, generator=generator, device=device, dtype=torch.bfloat16
-        )
+        if generator is not None:
+            # The generator is a CPU generator (torch_npu does not support
+            # device-side generators): draw on CPU, then move to the device.
+            return torch.randn(
+                shape, generator=generator, dtype=torch.float32
+            ).to(device=device, dtype=torch.bfloat16)
+        return torch.randn(shape, device=device, dtype=torch.bfloat16)
 
     @torch.no_grad()
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
