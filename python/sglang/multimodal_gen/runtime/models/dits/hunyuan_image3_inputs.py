@@ -998,9 +998,12 @@ class HunyuanImage3InputPreparationMixin:
             # above the threshold
             sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
             sorted_indices_to_remove[..., 0] = 0
-            indices_to_remove = sorted_indices_to_remove.scatter(
-                1, sorted_indices, sorted_indices_to_remove
-            )
+            # Unsort without ``scatter``: the NPU AICPU ``ScatterElements``
+            # kernel fails on this bool scatter.  ``sorted_indices`` is a
+            # permutation, so its argsort is the inverse permutation and a
+            # gather maps the flags back to vocab order equivalently.
+            inverse_perm = torch.argsort(sorted_indices, dim=-1)
+            indices_to_remove = sorted_indices_to_remove.gather(1, inverse_perm)
             logits = logits.masked_fill(indices_to_remove, float("-inf"))
 
         probs = F.softmax(logits.float(), dim=-1)
