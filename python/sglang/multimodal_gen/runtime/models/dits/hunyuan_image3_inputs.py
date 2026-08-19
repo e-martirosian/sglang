@@ -1007,7 +1007,20 @@ class HunyuanImage3InputPreparationMixin:
             logits = logits.masked_fill(indices_to_remove, float("-inf"))
 
         probs = F.softmax(logits.float(), dim=-1)
-        samples = torch.multinomial(probs, num_samples=1, generator=generator)
+        probs = probs.float()
+
+        # Gumbel(0, 1)
+        uniform = torch.rand(
+            probs.shape,
+            device=probs.device,
+            dtype=torch.float32,
+            generator=generator,
+        )
+
+        gumbel = -torch.log(-torch.log(uniform.clamp_min(1e-20)))
+
+        samples = torch.argmax(torch.log(probs.clamp_min(1e-20)) + gumbel, dim=-1)
+        #samples = torch.multinomial(probs, num_samples=1, generator=generator)
         return samples.squeeze(-1).to(logits.device)
 
     @torch.no_grad()
