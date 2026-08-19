@@ -1003,8 +1003,14 @@ class HunyuanImage3InputPreparationMixin:
             )
             logits = logits.masked_fill(indices_to_remove, float("-inf"))
 
-        probs = F.softmax(logits, dim=-1)
-        return torch.multinomial(probs, num_samples=1, generator=generator).squeeze(-1)
+        probs = F.softmax(logits.float(), dim=-1)
+        if generator is not None:
+            # The NPU ``aclnnMultinomial`` kernel does not accept a device
+            # generator (and rejects non-fp32 inputs); sample on CPU where
+            # the generator is honored, then move the indices back.
+            probs = probs.cpu()
+        samples = torch.multinomial(probs, num_samples=1, generator=generator)
+        return samples.squeeze(-1).to(logits.device)
 
     @torch.no_grad()
     def generate_text(
