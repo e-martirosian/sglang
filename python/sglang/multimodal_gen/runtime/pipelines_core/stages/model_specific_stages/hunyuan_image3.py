@@ -589,9 +589,19 @@ class HunyuanImage3DecodeStage(PipelineStage):
         if has_temporal_factor:
             latents = latents.unsqueeze(2)
 
-        device_type = current_platform.device_type
-        with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=True):
-            frames = vae.decode(latents, return_dict=False)[0]
+        # Mirror the official ``decode_dist``: decode with spatial tiling
+        # temporarily enabled (384x384 pixel tiles) so peak activation
+        # memory stays bounded while the 80B backbone is still resident.
+        prev_spatial_tiling = getattr(vae, "use_spatial_tiling", None)
+        if prev_spatial_tiling is not None:
+            vae.enable_spatial_tiling()
+        try:
+            device_type = current_platform.device_type
+            with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=True):
+                frames = vae.decode(latents, return_dict=False)[0]
+        finally:
+            if prev_spatial_tiling is not None:
+                vae.use_spatial_tiling = prev_spatial_tiling
 
         if has_temporal_factor:
             assert frames.shape[2] == 1, (
