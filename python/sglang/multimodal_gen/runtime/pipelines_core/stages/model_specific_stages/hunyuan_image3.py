@@ -5,6 +5,7 @@ Implements the diffusion sampling loop directly using the sglang backbone's
 """
 
 import os
+import sys
 from functools import partial
 from typing import Any, Optional
 
@@ -198,6 +199,50 @@ class HunyuanImage3AR(PipelineStage):
             )
         return self._custom_tokenizer
 
+    def _get_image_info_class(self, tokenizer):
+        """Extract the ImageInfo class from the tokenizer's module namespace.
+
+        The tokenizer and processor may load ``tokenization_hunyuan_image_3.py``
+        from different ``transformers_modules`` cache directories, producing
+        different Python classes with the same name.  To avoid ``isinstance``
+        failures inside the tokenizer, we always use the ``ImageInfo`` class
+        that lives in the *tokenizer's* module.
+        """
+        tok_mod = sys.modules.get(tokenizer.__class__.__module__)
+        if tok_mod is not None and hasattr(tok_mod, "ImageInfo"):
+            return tok_mod.ImageInfo
+        # Fallback: search parent modules
+        parts = tokenizer.__class__.__module__.split(".")
+        for i in range(len(parts) - 1, 0, -1):
+            parent = ".".join(parts[:i])
+            mod = sys.modules.get(parent)
+            if mod is not None and hasattr(mod, "ImageInfo"):
+                return mod.ImageInfo
+        return None
+
+    def _rebuild_image_info(self, image_info, ImageInfoCls):
+        """Re-create *image_info* as an instance of *ImageInfoCls*.
+
+        Copies all public attributes so the tokenizer's ``isinstance`` check
+        succeeds even when the processor and tokenizer loaded
+        ``tokenization_hunyuan_image_3.py`` from different cache directories.
+        """
+        if isinstance(image_info, ImageInfoCls):
+            return image_info
+        new_info = ImageInfoCls()
+        for attr in (
+            "image_height",
+            "image_width",
+            "token_height",
+            "token_width",
+            "image_slices",
+            "image_seq_length",
+            "image_position",
+        ):
+            if hasattr(image_info, attr):
+                setattr(new_info, attr, getattr(image_info, attr))
+        return new_info
+
     def _resolve_processor(self, server_args: ServerArgs):
         """Return the image processor, loading it lazily if needed."""
         if self._processor is not None:
@@ -390,6 +435,11 @@ class HunyuanImage3AR(PipelineStage):
             width = image_info.image_width
             token_h = image_info.token_height
             token_w = image_info.token_width
+            # Ensure ImageInfo uses the tokenizer's module class so that
+            # isinstance checks inside the tokenizer succeed.
+            ImageInfoCls = self._get_image_info_class(tokenizer)
+            if ImageInfoCls is not None:
+                image_info = self._rebuild_image_info(image_info, ImageInfoCls)
         else:
             # Fallback: compute from VAE downsample factor
             vae_factor = getattr(
