@@ -223,24 +223,15 @@ class HunyuanImage3AR(PipelineStage):
     def _rebuild_image_info(self, image_info, ImageInfoCls):
         """Re-create *image_info* as an instance of *ImageInfoCls*.
 
-        Copies all public attributes so the tokenizer's ``isinstance`` check
+        Copies all instance attributes so the tokenizer's ``isinstance`` check
         succeeds even when the processor and tokenizer loaded
         ``tokenization_hunyuan_image_3.py`` from different cache directories.
         """
         if isinstance(image_info, ImageInfoCls):
             return image_info
-        new_info = ImageInfoCls()
-        for attr in (
-            "image_height",
-            "image_width",
-            "token_height",
-            "token_width",
-            "image_slices",
-            "image_seq_length",
-            "image_position",
-        ):
-            if hasattr(image_info, attr):
-                setattr(new_info, attr, getattr(image_info, attr))
+        # Create a bare instance and copy all attributes from the source.
+        new_info = ImageInfoCls.__new__(ImageInfoCls)
+        new_info.__dict__.update(image_info.__dict__)
         return new_info
 
     def _resolve_processor(self, server_args: ServerArgs):
