@@ -539,10 +539,28 @@ class HunyuanImage3AR(PipelineStage):
             actual_batch_size, seq_len, image_slices, device
         )
 
+        # Non-first-step attention mask: shorter sequence [timestep_tok, image_toks...]
+        non_first_seq_len = 1 + num_image_tokens
+        non_first_image_slices = [
+            [slice(1, non_first_seq_len)]
+            for _ in range(actual_batch_size)
+        ]
+        non_first_attention_mask = _build_causal_attention_mask(
+            actual_batch_size, non_first_seq_len, non_first_image_slices, device
+        )
+
         # 5. Build 2D RoPE image info and compute cached cos/sin
         rope_image_info = _build_rope_image_info(tokenizer_output, actual_batch_size)
-        head_dim = self.ar_model.cached_rope.head_dim
         cos, sin = self.ar_model.cached_rope(seq_len, device, rope_image_info=rope_image_info)
+
+        # Pre-build RoPE for non-first steps (shorter sequence: 1 timestep + image tokens).
+        non_first_rope_info: list[list[tuple[slice, tuple[int, int]]]] = [
+            [(slice(1, non_first_seq_len), (token_h, token_w))]
+            for _ in range(actual_batch_size)
+        ]
+        non_first_cos, non_first_sin = self.ar_model.cached_rope(
+            non_first_seq_len, device, rope_image_info=non_first_rope_info
+        )
 
         # 6. Set up the diffusion scheduler
         num_inference_steps = int(
@@ -615,9 +633,17 @@ class HunyuanImage3AR(PipelineStage):
                         t_expand, latent_model_input, actual_batch_size,
                     )
 
+                # Select the correct RoPE and attention mask for this step
+                if first_step:
+                    step_cos, step_sin = cos, sin
+                    step_attn_mask = attention_mask
+                else:
+                    step_cos, step_sin = non_first_cos, non_first_sin
+                    step_attn_mask = non_first_attention_mask
+
                 # Run backbone
                 backbone_out = backbone_fn(
-                    hidden_states, attention_mask, (cos, sin), first_step,
+                    hidden_states, step_attn_mask, (step_cos, step_sin), first_step,
                 )
 
                 # Extract diffusion prediction
