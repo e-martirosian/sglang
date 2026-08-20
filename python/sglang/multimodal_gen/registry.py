@@ -455,6 +455,23 @@ def _get_config_info(
             model_id = _MODEL_HF_PATH_TO_NAME[registered_model_hf_id]
             return _CONFIG_REGISTRY.get(model_id)
 
+    # 2c. Match ModelScope cache paths such as:
+    #   /root/.cache/modelscope/hub/models/Org-Name/Model-Name/
+    # Example:
+    #    /root/.cache/modelscope/hub/models/Tencent-Hunyuan/HunyuanImage-3.0-Instruct/
+    if "modelscope" in model_path.lower() and "/hub/models/" in model_path.lower():
+        model_short_name = get_model_short_name(model_path.lower())
+        for registered_model_hf_id in all_model_hf_paths:
+            registered_model_name = get_model_short_name(registered_model_hf_id.lower())
+            if registered_model_name == model_short_name:
+                logger.debug(
+                    "Resolved ModelScope cache path '%s' to registered model '%s'.",
+                    model_path,
+                    registered_model_hf_id,
+                )
+                model_id = _MODEL_HF_PATH_TO_NAME[registered_model_hf_id]
+                return _CONFIG_REGISTRY.get(model_id)
+
     # 3. Use detectors
     config = maybe_download_model_index(model_path)
     pipeline_name = config.get("_class_name", "").lower()
@@ -1038,6 +1055,7 @@ def _register_configs():
         pipeline_config_cls=HunyuanImage3PipelineConfig,
         hf_model_paths=[
             "tencent/HunyuanImage-3.0-Instruct",
+            "Tencent-Hunyuan/HunyuanImage-3.0-Instruct",
         ],
         model_detectors=[
             lambda hf_id: "hunyuanimage-3" in hf_id.lower()
