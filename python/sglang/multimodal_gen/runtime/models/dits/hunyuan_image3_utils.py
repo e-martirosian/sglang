@@ -14,18 +14,22 @@
 """Custom attention metadata, 2D RoPE and image KV-cache helpers used by the
 HunyuanImage-3 model during image generation.
 
-Ported from the vLLM implementation
-(`vllm/model_executor/models/hunyuan_image3_utils.py`).
+Ported from the official HunyuanImage-3 model repository
+(`modeling_hunyuan_image_3.py`).
 """
 
+import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 
 
-# 1. custom attention meta.
+# =============================================================
+# 1. Custom attention meta.
+# =============================================================
+
 @dataclass
 class HunYuanImageAttentionMeta:
     query_lens: list[int]
@@ -46,7 +50,10 @@ def create_hunyuan_image_attention_meta(
     )
 
 
-# 2. custom Rope2D impl.
+# =============================================================
+# 2. RoPE helpers
+# =============================================================
+
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
@@ -122,7 +129,7 @@ class HunYuanRotary2DEmbedder:
         device = q.device
         cos, sin = self._prepare_cos_sin(custom_pos_emb, first_step, device)
 
-        bs = len(attn_metadata.query_lens)
+        bs = len(attn_meta.query_lens)
         q_len = attn_meta.query_lens[0]
         assert hidden_states.shape[0] == bs * q_len
 
@@ -145,6 +152,218 @@ class HunYuanRotary2DEmbedder:
         return q, k
 
 
+# =============================================================
+# 3. 2D RoPE construction (ported from official model repo)
+# =============================================================
+
+def _to_tuple(x, dim=2):
+    if isinstance(x, int):
+        return (x,) * dim
+    elif len(x) == dim:
+        return x
+    else:
+        raise ValueError(f"Expected length {dim} or int, but got {x}")
+
+
+def get_meshgrid_nd(start, *args, dim=2, device="cpu"):
+    """Get n-D meshgrid with start, stop and num."""
+    if len(args) == 0:
+        num = _to_tuple(start, dim=dim)
+        start = (0,) * dim
+        stop = num
+    elif len(args) == 1:
+        start = _to_tuple(start, dim=dim)
+        stop = _to_tuple(args[0], dim=dim)
+        num = [stop[i] - start[i] for i in range(dim)]
+        num_int = [int(x) for x in num]
+        assert (torch.tensor(num) == torch.tensor(num_int)).all(), f"num should be int, but got {num}"
+        num = num_int
+    elif len(args) == 2:
+        start = _to_tuple(start, dim=dim)
+        stop = _to_tuple(args[0], dim=dim)
+        num = _to_tuple(args[1], dim=dim)
+    else:
+        raise ValueError(f"len(args) should be 0, 1 or 2, but got {len(args)}")
+
+    axis_grid = []
+    for i in range(dim):
+        a, b, n = start[i], stop[i], num[i]
+        g = torch.linspace(a, b, n + 1, dtype=torch.float32, device=device)[:n]
+        axis_grid.append(g)
+    grid = torch.meshgrid(*axis_grid, indexing="ij")
+    grid = torch.stack(grid, dim=0)
+    return grid
+
+
+def build_2d_rope(
+    seq_len: int,
+    n_elem: int,
+    image_infos: Optional[List[Tuple[slice, Tuple[int, int]]]] = None,
+    device: Optional[torch.device] = None,
+    base: int = 10000,
+    base_rescale_factor: float = 1.0,
+    return_all_pos: bool = False,
+):
+    """Build 2D RoPE cos/sin tables.
+
+    Text positions use sequential 1D indices (y = x = index).
+    Image positions use 2D grid indices derived from the image layout.
+
+    Returns
+    -------
+    cos: torch.Tensor with shape [seq_len, n_elem]
+    sin: torch.Tensor with shape [seq_len, n_elem]
+    """
+    assert n_elem % 4 == 0, f"n_elem must be divisible by 4, but got {n_elem}."
+
+    if base_rescale_factor != 1.0:
+        base *= base_rescale_factor ** (n_elem / (n_elem - 2))
+    theta = 1.0 / (base ** (torch.arange(0, n_elem, 2, device=device).float() / n_elem))
+    theta = theta.reshape(1, n_elem // 4, 2)  # [1, half_d, 2]
+
+    if image_infos is None:
+        image_infos = []
+
+    image_infos_list = [image_infos]
+    sample_seq_lens = [seq_len]
+
+    x_sections = []
+    y_sections = []
+    for sample_id, sample_image_infos in enumerate(image_infos_list):
+        last_pos = 0
+        for sec_slice, (h, w) in sample_image_infos:
+            L = sec_slice.start
+            if last_pos < L:
+                y_sections.append(torch.arange(last_pos, L, device=device))
+                x_sections.append(torch.arange(last_pos, L, device=device))
+            elif h is None:
+                y_sections.append(torch.arange(sec_slice.start, sec_slice.stop, device=device))
+                x_sections.append(torch.arange(sec_slice.start, sec_slice.stop, device=device))
+                continue
+            else:
+                pass
+            beta_y = L + (w * h - h) / 2
+            beta_x = L + (w * h - w) / 2
+            grid = get_meshgrid_nd((beta_y, beta_x), (beta_y + h, beta_x + w), device=device)
+            grid = grid.reshape(2, -1)
+            y_sections.append(grid[0])
+            x_sections.append(grid[1])
+            last_pos = L + w * h
+        y_sections.append(torch.arange(last_pos, sample_seq_lens[sample_id], device=device))
+        x_sections.append(torch.arange(last_pos, sample_seq_lens[sample_id], device=device))
+
+    x_pos = torch.cat(x_sections).long()
+    y_pos = torch.cat(y_sections).long()
+    x_pos = x_pos[:seq_len]
+    y_pos = y_pos[:seq_len]
+    all_pos = torch.stack((y_pos, x_pos), dim=1).unsqueeze(1).to(device)  # [seq_len, 1, 2]
+
+    idx_theta = (all_pos * theta).reshape(all_pos.shape[0], n_elem // 2).repeat(1, 2)
+    cos = torch.cos(idx_theta)
+    sin = torch.sin(idx_theta)
+
+    if return_all_pos:
+        return cos, sin, all_pos
+    return cos, sin
+
+
+def build_batch_2d_rope(
+    seq_len: int,
+    n_elem: int,
+    image_infos: Optional[List[List[Tuple[slice, Tuple[int, int]]]]] = None,
+    device: Optional[torch.device] = None,
+    base: int = 10000,
+    base_rescale_factor: float = 1.0,
+    return_all_pos: bool = False,
+):
+    """Build batched 2D RoPE cos/sin tables."""
+    cos_list, sin_list, all_pos_list = [], [], []
+    if image_infos is None:
+        image_infos = [None]
+    for i, image_info in enumerate(image_infos):
+        res = build_2d_rope(
+            seq_len, n_elem, image_infos=image_info, device=device,
+            base=base, base_rescale_factor=base_rescale_factor,
+            return_all_pos=return_all_pos,
+        )
+        if return_all_pos:
+            cos, sin, all_pos = res
+        else:
+            cos, sin = res
+            all_pos = None
+        cos_list.append(cos)
+        sin_list.append(sin)
+        all_pos_list.append(all_pos)
+
+    stacked_cos = torch.stack(cos_list, dim=0)
+    stacked_sin = torch.stack(sin_list, dim=0)
+
+    if return_all_pos:
+        return stacked_cos, stacked_sin, all_pos_list
+    return stacked_cos, stacked_sin
+
+
+class CachedRoPE:
+    """Cache for 2D RoPE cos/sin tables to avoid recomputation across diffusion steps."""
+
+    def __init__(self, rope_theta: float, head_dim: int, rope_type: str = "2d"):
+        self.rope_theta = rope_theta
+        self.head_dim = head_dim
+        self.rope_type = rope_type
+        self.cos_cache = None
+        self.sin_cache = None
+        self.seq_len = None
+        self.rope_image_info = None
+
+    def __call__(self, seq_len, device, rope_image_info=None, position_ids=None):
+        if (self.seq_len != seq_len) or (rope_image_info is not None and self.rope_image_info != rope_image_info):
+            if self.rope_type in ["2d", "default"]:
+                self.cos_cache, self.sin_cache = build_batch_2d_rope(
+                    image_infos=rope_image_info,
+                    seq_len=seq_len,
+                    n_elem=self.head_dim,
+                    device=device,
+                    base=self.rope_theta,
+                )
+            else:
+                raise NotImplementedError(f"rope_type `{self.rope_type}` not supported")
+            self.seq_len = seq_len
+            self.rope_image_info = rope_image_info
+
+        if position_ids is None:
+            cos, sin = self.cos_cache, self.sin_cache
+        else:
+            assert position_ids.dim() == 2, f"{position_ids.shape=}"
+            head_size = self.cos_cache.size(-1)
+            cos = torch.gather(self.cos_cache, dim=1, index=position_ids.unsqueeze(-1).expand(-1, -1, head_size))
+            sin = torch.gather(self.sin_cache, dim=1, index=position_ids.unsqueeze(-1).expand(-1, -1, head_size))
+
+        return cos, sin
+
+
+# =============================================================
+# 4. Timestep embedding helpers (ported from official model repo)
+# =============================================================
+
+def timestep_embedding(t, dim, max_period=10000):
+    """Create sinusoidal timestep embeddings."""
+    half = dim // 2
+    freqs = torch.exp(
+        -math.log(max_period)
+        * torch.arange(start=0, end=half, dtype=torch.float32)
+        / half
+    ).to(device=t.device)
+    args = t[:, None].float() * freqs[None]
+    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    if dim % 2:
+        embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+    return embedding
+
+
+# =============================================================
+# 5. Custom attention impl (KV cache for image tokens).
+# =============================================================
+
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
@@ -155,7 +374,6 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
-# 3. custom attention impl.
 class ImageKVCacheManager:
     """
     Manages specialized caching and updating of KV-Cache for image tokens.

@@ -14,7 +14,7 @@ class HunyuanImage3SamplingParams(SamplingParams):
 
     negative_prompt: str = ""
     num_frames: int = 1
-    guidance_scale: float = 5.0
+    guidance_scale: float = 2.5
     num_inference_steps: int = 50
 
     # HunyuanImage-3 specific params

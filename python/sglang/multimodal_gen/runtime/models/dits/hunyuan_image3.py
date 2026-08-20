@@ -13,12 +13,12 @@
 # limitations under the License.
 """HunyuanImage-3 model for sglang multimodal_gen diffusion pipeline.
 
-This is the AR transformer backbone + forward_block denoising interface for
+This is the AR transformer backbone + diffusion I/O interface for
 HunyuanImage-3. It lives in multimodal_gen (not srt) because HunyuanImage-3
 is a diffusion model, not an LLM serving model.
 
-Ported from the vLLM implementation
-(`vllm/model_executor/models/hunyuan_image3.py`).
+Ported from the official HunyuanImage-3 model repository
+(`modeling_hunyuan_image_3.py`).
 
 Uses multimodal_gen layers for TP parallelism, attention, RoPE and
 embeddings. The fused-MoE stack (FusedMoE/TopK and its parallel context)
@@ -26,10 +26,14 @@ still comes from srt because multimodal_gen does not yet provide a fused
 MoE layer of its own.
 """
 
+import math
 import re
+import types
 from typing import Iterable, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
+from einops import rearrange
 from torch import nn
 from transformers import PretrainedConfig
 
@@ -65,25 +69,20 @@ from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.configs.models.dits.hunyuan_image3 import HunyuanImage3DitConfig
 
 from .hunyuan_image3_utils import (
+    CachedRoPE,
     HunYuanImageAttentionMeta,
     HunYuanRotary2DEmbedder,
     ImageKVCacheManager,
     create_hunyuan_image_attention_meta,
+    timestep_embedding,
 )
 
 # Weight names belonging to the non-AR parts of the HunyuanImage-3 checkpoint
-# (VAE, ViT, diffusion head, ...). These are skipped.
+# (VAE, ViT). These are skipped during backbone weight loading.
 UNEXPECTED_KEYWORDS = [
     "vae",
     "vision_aligner",
     "vision_model",
-    "final_layer",
-    "patch_embed",
-    "timestep_emb",
-    "time_embed",
-    "time_embed_2",
-    "guidance_emb",
-    "timestep_r_emb",
 ]
 
 
@@ -110,6 +109,268 @@ def _get_layer_value(config: PretrainedConfig, field: str, layer_id: int, defaul
         assert layer_id >= 0 and len(value) > layer_id, f"{field}[{layer_id}] missing"
         return value[layer_id]
     return value
+
+
+# =============================================================
+# Diffusion I/O helper functions and modules
+# (ported from official HunyuanImage-3 model repository)
+# =============================================================
+
+def _conv_nd(dims, *args, **kwargs):
+    """Create a 1D, 2D, or 3D convolution module."""
+    if dims == 1:
+        return nn.Conv1d(*args, **kwargs)
+    elif dims == 2:
+        return nn.Conv2d(*args, **kwargs)
+    elif dims == 3:
+        return nn.Conv3d(*args, **kwargs)
+    raise ValueError(f"unsupported dimensions: {dims}")
+
+
+def _zero_module(module):
+    """Zero out the parameters of a module and return it."""
+    for p in module.parameters():
+        p.detach().zero_()
+    return module
+
+
+def _normalization(channels, **kwargs):
+    """GroupNorm normalization."""
+    return nn.GroupNorm(32, channels, **kwargs)
+
+
+class _Upsample(nn.Module):
+    """Upsample layer with optional convolution (dims=3 for spatial 2D)."""
+
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, device=None, dtype=None):
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.channels = channels
+        self.out_channels = out_channels or channels
+        self.use_conv = use_conv
+        self.dims = dims
+        if use_conv:
+            self.conv = _conv_nd(dims, self.channels, self.out_channels, 3, padding=1, **factory_kwargs)
+
+    def forward(self, x):
+        assert x.shape[1] == self.channels
+        if self.dims == 3:
+            x = F.interpolate(
+                x, (x.shape[2], x.shape[3] * 2, x.shape[4] * 2), mode="nearest"
+            )
+        else:
+            x = F.interpolate(x, scale_factor=2, mode="nearest")
+        if self.use_conv:
+            x = self.conv(x)
+        return x
+
+
+class _Downsample(nn.Module):
+    """Downsample layer with optional convolution (dims=3 for spatial 2D)."""
+
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, device=None, dtype=None):
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.channels = channels
+        self.out_channels = out_channels or channels
+        self.use_conv = use_conv
+        self.dims = dims
+        stride = 2 if dims != 3 else (1, 2, 2)
+        if use_conv:
+            self.op = _conv_nd(
+                dims, self.channels, self.out_channels, 3, stride=stride, padding=1, **factory_kwargs
+            )
+        else:
+            assert self.channels == self.out_channels
+            self.op = nn.AvgPool2d(kernel_size=stride, stride=stride)
+
+    def forward(self, x):
+        assert x.shape[1] == self.channels
+        return self.op(x)
+
+
+class _ResBlock(nn.Module):
+    """Residual block with timestep embedding conditioning."""
+
+    def __init__(
+        self, in_channels, emb_channels, out_channels=None, dropout=0.0,
+        use_conv=False, dims=2, up=False, down=False, device=None, dtype=None,
+    ):
+        factory_kwargs = {"dtype": dtype, "device": device}
+        super().__init__()
+        self.in_channels = in_channels
+        self.dropout = dropout
+        self.out_channels = out_channels or self.in_channels
+
+        self.in_layers = nn.Sequential(
+            _normalization(self.in_channels, **factory_kwargs),
+            nn.SiLU(),
+            _conv_nd(dims, self.in_channels, self.out_channels, 3, padding=1, **factory_kwargs),
+        )
+
+        self.updown = up or down
+        if up:
+            self.h_upd = _Upsample(self.in_channels, False, dims, **factory_kwargs)
+            self.x_upd = _Upsample(self.in_channels, False, dims, **factory_kwargs)
+        elif down:
+            self.h_upd = _Downsample(self.in_channels, False, dims, **factory_kwargs)
+            self.x_upd = _Downsample(self.in_channels, False, dims, **factory_kwargs)
+        else:
+            self.h_upd = self.x_upd = nn.Identity()
+
+        self.emb_layers = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(emb_channels, 2 * self.out_channels, **factory_kwargs),
+        )
+
+        self.out_layers = nn.Sequential(
+            _normalization(self.out_channels, **factory_kwargs),
+            nn.SiLU(),
+            nn.Dropout(p=dropout),
+            _zero_module(
+                _conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1, **factory_kwargs)
+            ),
+        )
+
+        if self.out_channels == self.in_channels:
+            self.skip_connection = nn.Identity()
+        elif use_conv:
+            self.skip_connection = _conv_nd(
+                dims, self.in_channels, self.out_channels, 3, padding=1, **factory_kwargs
+            )
+        else:
+            self.skip_connection = _conv_nd(
+                dims, self.in_channels, self.out_channels, 1, **factory_kwargs
+            )
+
+    def forward(self, x, emb):
+        if self.updown:
+            in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
+            h = in_rest(x)
+            h = self.h_upd(h)
+            x = self.x_upd(x)
+            h = in_conv(h)
+        else:
+            h = self.in_layers(x)
+
+        emb_out = self.emb_layers(emb)
+        while len(emb_out.shape) < len(h.shape):
+            emb_out = emb_out[..., None]
+
+        out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
+        scale, shift = torch.chunk(emb_out, 2, dim=1)
+        h = out_norm(h) * (1.0 + scale) + shift
+        h = out_rest(h)
+
+        return self.skip_connection(x) + h
+
+
+class TimestepEmbedder(nn.Module):
+    """Embeds scalar timesteps into vector representations."""
+
+    def __init__(self, hidden_size, act_layer=nn.GELU, frequency_embedding_size=256,
+                 max_period=10000, out_size=None, dtype=None, device=None):
+        factory_kwargs = {"dtype": dtype, "device": device}
+        super().__init__()
+        self.frequency_embedding_size = frequency_embedding_size
+        self.max_period = max_period
+        if out_size is None:
+            out_size = hidden_size
+        self.mlp = nn.Sequential(
+            nn.Linear(frequency_embedding_size, hidden_size, bias=True, **factory_kwargs),
+            act_layer(),
+            nn.Linear(hidden_size, out_size, bias=True, **factory_kwargs),
+        )
+
+    def forward(self, t):
+        t_freq = timestep_embedding(t, self.frequency_embedding_size, self.max_period)
+        t_freq = t_freq.type(self.mlp[0].weight.dtype)
+        return self.mlp(t_freq)
+
+
+class UNetDown(nn.Module):
+    """Patch embed: converts noise latents (B, C, H, W) into sequence embeddings."""
+
+    def __init__(self, patch_size, in_channels, emb_channels, hidden_channels,
+                 out_channels, dropout=0.0, device=None, dtype=None):
+        factory_kwargs = {"dtype": dtype, "device": device}
+        super().__init__()
+        self.patch_size = patch_size
+        assert self.patch_size in [1, 2, 4, 8]
+
+        self.model = nn.ModuleList([
+            _conv_nd(2, in_channels=in_channels, out_channels=hidden_channels,
+                     kernel_size=3, padding=1, **factory_kwargs)
+        ])
+        if self.patch_size == 1:
+            self.model.append(_ResBlock(
+                in_channels=hidden_channels, emb_channels=emb_channels,
+                out_channels=out_channels, dropout=dropout, **factory_kwargs,
+            ))
+        else:
+            for i in range(self.patch_size // 2):
+                self.model.append(_ResBlock(
+                    in_channels=hidden_channels, emb_channels=emb_channels,
+                    out_channels=(hidden_channels if (i + 1) * 2 != self.patch_size else out_channels),
+                    dropout=dropout, down=True, **factory_kwargs,
+                ))
+
+    def forward(self, x, t):
+        assert x.shape[2] % self.patch_size == 0 and x.shape[3] % self.patch_size == 0
+        for module in self.model:
+            if isinstance(module, _ResBlock):
+                x = module(x, t)
+            else:
+                x = module(x)
+        _, _, token_h, token_w = x.shape
+        x = rearrange(x, "b c h w -> b (h w) c")
+        return x, token_h, token_w
+
+
+class UNetUp(nn.Module):
+    """Final layer: converts backbone output sequence into noise predictions."""
+
+    def __init__(self, patch_size, in_channels, emb_channels, hidden_channels,
+                 out_channels, dropout=0.0, device=None, dtype=None, out_norm=False):
+        factory_kwargs = {"dtype": dtype, "device": device}
+        super().__init__()
+        self.patch_size = patch_size
+        assert self.patch_size in [1, 2, 4, 8]
+        self.model = nn.ModuleList()
+
+        if self.patch_size == 1:
+            self.model.append(_ResBlock(
+                in_channels=in_channels, emb_channels=emb_channels,
+                out_channels=hidden_channels, dropout=dropout, **factory_kwargs,
+            ))
+        else:
+            for i in range(self.patch_size // 2):
+                self.model.append(_ResBlock(
+                    in_channels=in_channels if i == 0 else hidden_channels,
+                    emb_channels=emb_channels, out_channels=hidden_channels,
+                    dropout=dropout, up=True, **factory_kwargs,
+                ))
+
+        if out_norm:
+            self.model.append(nn.Sequential(
+                _normalization(hidden_channels, **factory_kwargs),
+                nn.SiLU(),
+                _conv_nd(2, hidden_channels, out_channels, kernel_size=3,
+                         padding=1, **factory_kwargs),
+            ))
+        else:
+            self.model.append(_conv_nd(
+                2, hidden_channels, out_channels, kernel_size=3,
+                padding=1, **factory_kwargs))
+
+    def forward(self, x, t, token_h, token_w):
+        x = rearrange(x, "b (h w) c -> b c h w", h=token_h, w=token_w)
+        for module in self.model:
+            if isinstance(module, _ResBlock):
+                x = module(x, t)
+            else:
+                x = module(x)
+        return x
 
 
 class HunYuanMLP(nn.Module):
@@ -647,22 +908,76 @@ class HunyuanImage3ForCausalMM(CachableDiT):
     ):
         super().__init__(config=config, **kwargs)
         self.config = config
-        hf_config = config.arch_config
-        self.hf_config = hf_config
+        # self.hf_config is the full HF config dict set by BaseDiT.__init__
+        # (from the pipeline's config_dict). It contains all fields including
+        # diffusion-specific ones (patch_size, patch_embed_hidden_dim, etc.).
+        # The arch_config dataclass only has backbone fields.
+        # Wrap the dict in a SimpleNamespace for attribute-style access.
+        raw_hf_config = self.hf_config
+        if isinstance(raw_hf_config, dict):
+            hf_config = types.SimpleNamespace(**raw_hf_config)
+            self.hf_config = hf_config
+        else:
+            hf_config = raw_hf_config
+        # For the backbone model, use the arch config (dataclass with
+        # attribute access) which has all required transformer fields.
+        backbone_config = config.arch_config
 
         self.model = HunyuanImage3Model(
-            hf_config, prefix=f"{prefix}.model",
+            backbone_config, prefix=f"{prefix}.model",
         )
-        self.unpadded_vocab_size = hf_config.vocab_size
+        self.unpadded_vocab_size = backbone_config.vocab_size
         # multimodal_gen has no dedicated LM-head layer; the vocab-parallel
         # embedding shares its layout and only `.weight` is consumed downstream.
         self.lm_head = VocabParallelEmbedding(
-            self.unpadded_vocab_size, hf_config.hidden_size,
+            self.unpadded_vocab_size, backbone_config.hidden_size,
             org_num_embeddings=self.unpadded_vocab_size,
             prefix=f"{prefix}.lm_head",
         )
-        if getattr(hf_config, "tie_word_embeddings", False):
+        if getattr(backbone_config, "tie_word_embeddings", False):
             self.lm_head.weight = self.model.embed_tokens.weight
+
+        # ---- Diffusion I/O modules ----
+        patch_size = getattr(hf_config, "patch_size", 1)
+        patch_embed_hidden_dim = getattr(hf_config, "patch_embed_hidden_dim", 1024)
+        img_proj_type = getattr(hf_config, "img_proj_type", "unet")
+        # latent_channels may be at top-level or nested under hf_config.vae
+        if hasattr(hf_config, "vae") and isinstance(hf_config.vae, dict):
+            latent_channels = hf_config.vae["latent_channels"]
+        else:
+            latent_channels = getattr(hf_config, "latent_channels", 32)
+
+        if img_proj_type == "unet":
+            self.timestep_emb = TimestepEmbedder(hidden_size=hf_config.hidden_size)
+            self.patch_embed = UNetDown(
+                patch_size=patch_size,
+                emb_channels=hf_config.hidden_size,
+                in_channels=latent_channels,
+                hidden_channels=patch_embed_hidden_dim,
+                out_channels=hf_config.hidden_size,
+            )
+            self.time_embed = TimestepEmbedder(hidden_size=hf_config.hidden_size)
+            self.final_layer = UNetUp(
+                patch_size=patch_size,
+                emb_channels=hf_config.hidden_size,
+                in_channels=hf_config.hidden_size,
+                hidden_channels=patch_embed_hidden_dim,
+                out_channels=latent_channels,
+                out_norm=True,
+            )
+            self.time_embed_2 = TimestepEmbedder(hidden_size=hf_config.hidden_size)
+        else:
+            raise ValueError(f"Unknown img_proj_type: {img_proj_type}")
+
+        # Cached 2D RoPE for diffusion steps
+        head_dim = getattr(hf_config, "head_dim", None) or (
+            hf_config.hidden_size // hf_config.num_attention_heads
+        )
+        self.cached_rope = CachedRoPE(
+            rope_theta=getattr(hf_config, "rope_theta", 10000.0),
+            head_dim=head_dim,
+            rope_type=getattr(hf_config, "rope_type", "2d"),
+        )
 
     def forward(self, hidden_states, timestep=None, encoder_hidden_states=None, **kwargs):
         """DiT-style forward for denoising stage."""

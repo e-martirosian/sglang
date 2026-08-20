@@ -91,7 +91,9 @@ class HunyuanImage3PipelineConfig(SpatialImagePipelineConfig):
     def get_decode_scale_and_shift(self, device, dtype, vae):
         """Get scale and shift for latent decoding."""
         scaling_factor = self.vae_config.arch_config.scaling_factor
-        return scaling_factor, 0.0
+        shift_factor = getattr(self.vae_config.arch_config, "shift_factor", None)
+        shift = shift_factor if shift_factor else 0.0
+        return scaling_factor, shift
 
     def post_denoising_loop(self, latents, batch):
         """Post-process latents after denoising."""

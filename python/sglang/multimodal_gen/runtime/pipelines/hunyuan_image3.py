@@ -3,7 +3,6 @@ import os
 from itertools import chain
 from typing import Any
 
-import requests
 import torch
 from torch.distributed import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy
@@ -71,7 +70,6 @@ class HunyuanImage3Pipeline(LoRAPipeline, ComposedPipelineBase):
         "text_encoder",
         "tokenizer",
         "vae",
-        "vision_language_encoder",
         "processor",
         "transformer",
         "scheduler",
@@ -138,7 +136,7 @@ class HunyuanImage3Pipeline(LoRAPipeline, ComposedPipelineBase):
         ar_model = None
         if any(
             name not in modules
-            for name in ("transformer", "text_encoder", "vision_language_encoder")
+            for name in ("transformer", "text_encoder")
         ):
             ar_model = self._load_ar_model(
                 server_args, pipeline_config, model_path, config_dict
@@ -156,10 +154,6 @@ class HunyuanImage3Pipeline(LoRAPipeline, ComposedPipelineBase):
                 # HunyuanImage-3 has no standalone text encoder: the unified
                 # AR backbone provides text conditioning
                 modules["text_encoder"] = ar_model
-            elif module_name == "vision_language_encoder":
-                modules["vision_language_encoder"] = (
-                    self._load_vision_language_encoder(server_args, ar_model)
-                )
             elif module_name == "vae":
                 modules["vae"] = self._load_vae(
                     server_args, pipeline_config, model_path, vae_config_dict
@@ -384,30 +378,6 @@ class HunyuanImage3Pipeline(LoRAPipeline, ComposedPipelineBase):
             trust_remote_code=server_args.trust_remote_code,
         )
 
-    def _load_vision_language_encoder(
-        self, server_args: ServerArgs, ar_model: torch.nn.Module
-    ):
-        """Use a remote AR encoder server when configured, else the local AR backbone."""
-        if server_args.srt_encoder_url is not None:
-            health_url = server_args.srt_encoder_url.rstrip("/") + "/health"
-            try:
-                logger.info("Checking AR encoder server health at: %s", health_url)
-                response = requests.get(
-                    health_url, timeout=server_args.srt_encoder_connect_timeout
-                )
-                if response.status_code != 200:
-                    raise RuntimeError(
-                        f"AR encoder server returned unhealthy status code: {response.status_code}. "
-                        f"Please ensure the server at {server_args.srt_encoder_url} is fully initialized."
-                    )
-            except requests.RequestException as e:
-                raise RuntimeError(
-                    f"Failed to reach AR encoder server at {server_args.srt_encoder_url}. Error: {e}."
-                ) from e
-            logger.info("Using remote AR encoder server at %s", server_args.srt_encoder_url)
-            return server_args.srt_encoder_url
-        return ar_model
-
     def _load_processor(self, server_args: ServerArgs, model_path: str, hf_config):
         """Best-effort load of the repo's HunyuanImage3ImageProcessor."""
         if not server_args.trust_remote_code:
@@ -454,15 +424,17 @@ class HunyuanImage3Pipeline(LoRAPipeline, ComposedPipelineBase):
     # --- pipeline stages -----------------------------------------------------
 
     def create_pipeline_stages(self, server_args: ServerArgs):
-        # Stage 1: AR latent generation. Runs the official diffusion loop
+        # Stage 1: AR latent generation. Runs the native diffusion loop
         # with every backbone pass routed into the sglang backbone's
-        # forward_block, and stops before VAE decode. The AR stage shares
-        # the pipeline-loaded AR weights and VAE with its official shell
-        # model, so neither is loaded twice.
+        # forward_block. Stops before VAE decode.
         self.add_stage(
             HunyuanImage3AR(
                 ar_model=self.get_module("transformer"),
                 vae=self.get_module("vae"),
+                tokenizer=self.get_module("tokenizer"),
+                processor=self.get_module("processor"),
+                scheduler=self.get_module("scheduler"),
+                model_path=self.model_path,
             ),
             "hunyuan_image3_ar",
         )
