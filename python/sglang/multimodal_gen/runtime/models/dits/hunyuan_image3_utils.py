@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Custom attention metadata, 2D RoPE and image KV-cache helpers used by the
-HunyuanImage-3 autoregressive backbone during image generation.
+HunyuanImage-3 model during image generation.
 
 Ported from the vLLM implementation
 (`vllm/model_executor/models/hunyuan_image3_utils.py`).
@@ -55,23 +55,7 @@ def rotate_half(x):
 
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1, mla=False):
-    """Applies Rotary Position Embedding to the query and key tensors.
-
-    Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`, *optional*):
-            Position indices used to gather cos/sin. When provided, cos/sin
-            are indexed with `cos[position_ids]`.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The dimension along which cos/sin are unsqueezed so they can be
-            broadcast onto `[batch, heads, seq_len, head_dim]` shaped q/k.
-    Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using
-        the Rotary Position Embedding.
-    """
+    """Applies Rotary Position Embedding to the query and key tensors."""
     if position_ids is not None:
         cos = cos[position_ids]
         sin = sin[position_ids]
@@ -94,9 +78,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1, mla
 class HunYuanRotary2DEmbedder:
     """
     A RoPE wrapper specifically designed for HunYuan-Image attention.
-    Usage:
-        embedder = HunYuanRotary2DEmbedder(num_heads=num_h, num_kv_heads=num_kv, head_dim=h_d)
-        q, k = embedder(q, k, hidden_states, custom_pos_emb, attn_meta)
     """
 
     def __init__(self, num_heads: int, num_kv_heads: int, head_dim: int):
@@ -111,7 +92,6 @@ class HunYuanRotary2DEmbedder:
         first_step: bool,
         device: torch.device,
     ):
-        """Returns cos/sin on the target device based on first_step and caching strategy."""
         if first_step:
             cos_input, sin_input = custom_pos_emb
             cos = cos_input.to(device)
@@ -140,25 +120,17 @@ class HunYuanRotary2DEmbedder:
 
         first_step = attn_meta.first_step
         device = q.device
-        # 1. Prepare cos/sin
         cos, sin = self._prepare_cos_sin(custom_pos_emb, first_step, device)
 
-        # 2. Shape validation
-        bs = len(attn_meta.query_lens)
+        bs = len(attn_metadata.query_lens)
         q_len = attn_meta.query_lens[0]
-        assert hidden_states.shape[0] == bs * q_len, (
-            f"{hidden_states.shape[0]} != {bs * q_len}"
-        )
+        assert hidden_states.shape[0] == bs * q_len
 
-        # 3. Reshape + transpose for apply_rotary_pos_emb
-        #    Assume q shape [B*L, H*D] -> [B, L, H, D] -> [B, H, L, D]
         q = q.reshape(bs, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.reshape(bs, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
-        # 4. Apply RoPE
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        # 5. Restore original shape + convert to bfloat16
         q = (
             q.transpose(1, 2)
             .reshape(hidden_states.shape[0], self.num_heads * self.head_dim)
@@ -174,10 +146,6 @@ class HunYuanRotary2DEmbedder:
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
@@ -190,31 +158,16 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 # 3. custom attention impl.
 class ImageKVCacheManager:
     """
-    Manages specialized caching and updating of KV-Cache for image tokens in multimodal models.
-
-    During image generation the backbone is run step-by-step (one denoise
-    step per forward). The text prompt KV of the first step is cached and
-    only the newly generated image tokens are appended on later steps, while
-    attention is computed with SDPA under the caller-provided mask.
+    Manages specialized caching and updating of KV-Cache for image tokens.
     """
 
     def __init__(self, image_token_len: int = 4097):
-        """
-        Args:
-            image_token_len: Number of tokens per image (including special placeholders),
-            default 4097 (timestamp + 4096 image tokens).
-        """
         self.image_token_len: int = image_token_len
         self.image_kv_cache_map: tuple[torch.Tensor, torch.Tensor] | None = None
 
-    def _save_image_kv_caches(
-        self,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        seq_len: int,
-    ) -> None:
+    def _save_image_kv_caches(self, key, value, seq_len):
         bs, q_len, num_kv_heads, head_dim = key.shape
-        assert q_len == seq_len, f"for first-step, {q_len} != {seq_len}"
+        assert q_len == seq_len
 
         key = key.reshape(-1, num_kv_heads, head_dim)
         value = value.reshape(-1, num_kv_heads, head_dim)
@@ -224,10 +177,9 @@ class ImageKVCacheManager:
         cached_value = [value[:cached_prompt_len], value[seq_len - 1 : seq_len]]
 
         if bs > 1:
-            assert bs == 2, "for cfg case, bs must be 2"
+            assert bs == 2
             cached_key.append(key[seq_len : seq_len + cached_prompt_len])
             cached_key.append(key[-1:])
-
             cached_value.append(value[seq_len : seq_len + cached_prompt_len])
             cached_value.append(value[-1:])
 
@@ -235,19 +187,12 @@ class ImageKVCacheManager:
         cached_value = torch.cat(cached_value, dim=0)
         self.image_kv_cache_map = (cached_key, cached_value)
 
-    def _update_image_kv_caches(
-        self,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        seq_len: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _update_image_kv_caches(self, key, value, seq_len):
         cached_key, cached_value = self.image_kv_cache_map
         bs, q_len, num_kv_heads, head_dim = key.shape
 
         cached_prompt_len = cached_key.shape[0] // bs - 1
-        assert (cached_prompt_len + 1) == (seq_len - q_len), (
-            f"{cached_prompt_len + 1} != {seq_len - q_len}"
-        )
+        assert (cached_prompt_len + 1) == (seq_len - q_len)
 
         key = key.reshape(-1, num_kv_heads, head_dim)
         value = value.reshape(-1, num_kv_heads, head_dim)
@@ -264,19 +209,14 @@ class ImageKVCacheManager:
         ]
 
         if bs > 1:
-            assert bs == 2, "for cfg case, bs must be 2"
+            assert bs == 2
             new_key.append(
-                cached_key[
-                    cached_prompt_len + 1 : cached_prompt_len + 1 + cached_prompt_len
-                ]
+                cached_key[cached_prompt_len + 1 : cached_prompt_len + 1 + cached_prompt_len]
             )
             new_key.append(key[q_len:])
             new_key.append(cached_key[-1:])
-
             new_value.append(
-                cached_value[
-                    cached_prompt_len + 1 : cached_prompt_len + 1 + cached_prompt_len
-                ]
+                cached_value[cached_prompt_len + 1 : cached_prompt_len + 1 + cached_prompt_len]
             )
             new_value.append(value[q_len:])
             new_value.append(cached_value[-1:])
@@ -288,22 +228,15 @@ class ImageKVCacheManager:
 
         return new_key.contiguous(), new_value.contiguous()
 
-    def __call__(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attn_metadata: Optional[HunYuanImageAttentionMeta],
-        attention_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        assert attn_metadata is not None, "attn_metadata is required"
+    def __call__(self, query, key, value, attn_metadata, attention_mask=None):
+        assert attn_metadata is not None
         self.image_token_len = attn_metadata.num_image_tokens
         first_step = attn_metadata.first_step
 
         bs = len(attn_metadata.query_lens)
         q_len = attn_metadata.query_lens[0]
         seq_len = attn_metadata.seq_lens[0]
-        assert query.shape[0] == bs * q_len, f"{query.shape[0]} != {bs * q_len}"
+        assert query.shape[0] == bs * q_len
 
         head_num_per_rank = query.shape[1]
         kv_head_num_per_rank = key.shape[1]
@@ -333,8 +266,6 @@ class ImageKVCacheManager:
             query, key, value, attn_mask=attention_mask, dropout_p=0.0
         )
 
-        attn_output = attn_output.transpose(
-            1, 2
-        ).contiguous()  # [bs, q_len, heads, head_dim]
+        attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bs * q_len, head_num_per_rank, head_dim)
         return attn_output
