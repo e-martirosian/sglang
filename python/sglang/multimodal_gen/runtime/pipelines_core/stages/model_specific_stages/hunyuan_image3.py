@@ -349,8 +349,14 @@ class HunyuanImage3AR(PipelineStage):
         timesteps: torch.Tensor,
         timestep_index: torch.Tensor,
     ) -> torch.Tensor:
-        """Scatter timestep embeddings into hidden_states at timestep_index positions."""
+        """Scatter timestep embeddings into hidden_states at timestep_index positions.
+
+        The ``timestep_emb`` module produces one embedding per batch element,
+        but ``timestep_index`` may mark multiple sequence positions that should
+        all receive the *same* embedding vector.
+        """
         bsz, seqlen, n_embd = hidden_states.shape
+        # One embedding per batch element → [bsz, 1, n_embd]
         timestep_emb = self.ar_model.timestep_emb(timesteps).reshape(bsz, -1, n_embd)
         index = (
             torch.arange(seqlen, device=hidden_states.device)
@@ -358,6 +364,9 @@ class HunyuanImage3AR(PipelineStage):
             .expand(bsz, -1)
         )
         ts_scatter_index = index.masked_select(timestep_index.bool()).reshape(bsz, -1)
+        num_positions = ts_scatter_index.shape[1]
+        # Expand the single embedding to fill all marked positions
+        timestep_emb = timestep_emb.expand(-1, num_positions, -1)
         hidden_states = hidden_states.clone()
         hidden_states.scatter_(
             dim=1,
