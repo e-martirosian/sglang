@@ -56,11 +56,11 @@ from sglang.multimodal_gen.configs.pipeline_configs.flux import (
 from sglang.multimodal_gen.configs.pipeline_configs.glm_image import (
     GlmImagePipelineConfig,
 )
-from sglang.multimodal_gen.configs.pipeline_configs.hunyuan_image3 import (
-    HunyuanImage3PipelineConfig,
-)
 from sglang.multimodal_gen.configs.pipeline_configs.hunyuan3d import (
     Hunyuan3D2PipelineConfig,
+)
+from sglang.multimodal_gen.configs.pipeline_configs.hunyuan_image3 import (
+    HunyuanImage3PipelineConfig,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.ideogram import (
     Ideogram4DistilledPipelineConfig,
@@ -123,9 +123,6 @@ from sglang.multimodal_gen.configs.sample.flux import (
     FluxSamplingParams,
 )
 from sglang.multimodal_gen.configs.sample.glmimage import GlmImageSamplingParams
-from sglang.multimodal_gen.configs.sample.hunyuan_image3 import (
-    HunyuanImage3SamplingParams,
-)
 from sglang.multimodal_gen.configs.sample.helios import (
     HeliosDistilledSamplingParams,
     HeliosMidSamplingParams,
@@ -136,6 +133,9 @@ from sglang.multimodal_gen.configs.sample.hunyuan import (
     HunyuanSamplingParams,
 )
 from sglang.multimodal_gen.configs.sample.hunyuan3d import Hunyuan3DSamplingParams
+from sglang.multimodal_gen.configs.sample.hunyuan_image3 import (
+    HunyuanImage3SamplingParams,
+)
 from sglang.multimodal_gen.configs.sample.ideogram import (
     Ideogram4FastSamplingParams,
     Ideogram4InstantSamplingParams,
@@ -320,6 +320,8 @@ KNOWN_NON_DIFFUSERS_DIFFUSION_MODEL_PATTERNS: Dict[str, str] = {
     "pi05": "Pi05Pipeline",
     "pi0.5": "Pi05Pipeline",
     "hunyuan3d": "Hunyuan3D2Pipeline",
+    "hunyuanimage-3": "HunyuanImage3Pipeline",
+    "hunyuanimage3": "HunyuanImage3Pipeline",
     "flux.2-dev-nvfp4": "Flux2NvfpPipeline",
     "fal/ideogram-v4-fast": "Ideogram4FastPipeline",
     "fal/ideogram-v4-instant": "Ideogram4InstantPipeline",
@@ -454,23 +456,6 @@ def _get_config_info(
             )
             model_id = _MODEL_HF_PATH_TO_NAME[registered_model_hf_id]
             return _CONFIG_REGISTRY.get(model_id)
-
-    # 2c. Match ModelScope cache paths such as:
-    #   /root/.cache/modelscope/hub/models/Org-Name/Model-Name/
-    # Example:
-    #    /root/.cache/modelscope/hub/models/Tencent-Hunyuan/HunyuanImage-3.0-Instruct/
-    if "modelscope" in model_path.lower() and "/hub/models/" in model_path.lower():
-        model_short_name = get_model_short_name(model_path.lower())
-        for registered_model_hf_id in all_model_hf_paths:
-            registered_model_name = get_model_short_name(registered_model_hf_id.lower())
-            if registered_model_name == model_short_name:
-                logger.debug(
-                    "Resolved ModelScope cache path '%s' to registered model '%s'.",
-                    model_path,
-                    registered_model_hf_id,
-                )
-                model_id = _MODEL_HF_PATH_TO_NAME[registered_model_hf_id]
-                return _CONFIG_REGISTRY.get(model_id)
 
     # 3. Use detectors
     config = maybe_download_model_index(model_path)
@@ -1048,22 +1033,6 @@ def _register_configs():
         pipeline_config_cls=GlmImagePipelineConfig,
         model_detectors=[lambda hf_id: "glm-image" in hf_id.lower()],
     )
-
-    # HunyuanImage-3
-    register_configs(
-        sampling_param_cls=HunyuanImage3SamplingParams,
-        pipeline_config_cls=HunyuanImage3PipelineConfig,
-        hf_model_paths=[
-            "tencent/HunyuanImage-3.0-Instruct",
-            "Tencent-Hunyuan/HunyuanImage-3.0-Instruct",
-        ],
-        model_detectors=[
-            lambda hf_id: "hunyuanimage-3" in hf_id.lower()
-            or "hunyuan_image_3" in hf_id.lower()
-            or "hunyuan-image-3" in hf_id.lower()
-        ],
-    )
-
     register_configs(
         sampling_param_cls=Hunyuan3DSamplingParams,
         pipeline_config_cls=Hunyuan3D2PipelineConfig,
@@ -1071,6 +1040,15 @@ def _register_configs():
             "tencent/Hunyuan3D-2",
         ],
         model_detectors=[lambda hf_id: "hunyuan3d" in hf_id.lower()],
+    )
+    register_configs(
+        sampling_param_cls=HunyuanImage3SamplingParams,
+        pipeline_config_cls=HunyuanImage3PipelineConfig,
+        hf_model_paths=[
+            "tencent/HunyuanImage-3.0-Instruct",
+            "tencent/HunyuanImage-3.0",
+        ],
+        model_detectors=[lambda hf_id: "hunyuanimage" in hf_id.lower()],
     )
 
     # Helios
