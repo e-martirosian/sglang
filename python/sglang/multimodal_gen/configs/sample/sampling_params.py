@@ -1375,6 +1375,27 @@ class SamplingParams:
             type=int,
             help="Upscaling factor (default: 4).",
         )
+        # HunyuanImage-3 and similar model-specific tokenizer/prompt arguments
+        add_argument(
+            "--bot-task",
+            dest="bot_task",
+            type=str,
+            help=(
+                "Tokenizer bot task (model-specific). For HunyuanImage-3: "
+                "auto, image, think, recaption, img_ratio, none. "
+                "Controls the bot response prefix in the tokenizer."
+            ),
+        )
+        add_argument(
+            "--sys-type",
+            dest="sys_type",
+            type=str,
+            help=(
+                "System prompt type (model-specific). For HunyuanImage-3: "
+                "none, en_unified, en_vanilla, en_recaption, en_think_recaption, auto. "
+                "Controls which system prompt to use."
+            ),
+        )
         return parser
 
     @classmethod

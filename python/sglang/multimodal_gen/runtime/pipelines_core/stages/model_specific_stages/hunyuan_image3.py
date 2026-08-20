@@ -38,9 +38,9 @@ logger = init_logger(__name__)
 _DEFAULT_NUM_INFERENCE_STEPS = 50
 _DEFAULT_GUIDANCE_SCALE = 2.5
 
-# Unified system prompt from generation_config.json (use_system_prompt="en_unified")
-# This prompt instructs the model on its multimodal capabilities and image generation protocol.
-_DEFAULT_SYSTEM_PROMPT = """You are an advanced multimodal model whose core mission is to analyze user intent and generate high-quality text and images.
+# System prompts for HunyuanImage-3 (from vllm_omni system_prompt.py)
+_SYSTEM_PROMPTS = {
+    "en_unified": """You are an advanced multimodal model whose core mission is to analyze user intent and generate high-quality text and images.
 
 #### Four Core Capabilities
 1.  **Text-to-Text (T2T):** Generate coherent text responses from text prompts.
@@ -108,7 +108,36 @@ Adopt a task-diagnostic approach:
     *   **Replacement:** Use the logic "**replace B with A**," and provide a detailed description of A.
     *   **Addition:** Clearly state what to add, where, and what it looks like.
 *   **Unambiguous Referencing:** Avoid vague references (e.g., "that person"). Use specific descriptions of appearance.
-"""
+""",
+    "en_vanilla": "You are a helpful assistant to generate an image from user's description.",
+}
+
+
+def _get_system_prompt(sys_type: str) -> str | None:
+    """Get system prompt based on sys_type.
+    
+    Args:
+        sys_type: System prompt type. Options:
+            - "none": No system prompt
+            - "en_unified": Unified English system prompt (default)
+            - "en_vanilla": Simple English system prompt
+            - "auto": Auto-select (currently maps to en_unified)
+    
+    Returns:
+        System prompt string or None if sys_type is "none".
+    """
+    if sys_type == "none":
+        return None
+    elif sys_type in _SYSTEM_PROMPTS:
+        return _SYSTEM_PROMPTS[sys_type]
+    elif sys_type == "auto":
+        # Auto-select based on task (default to en_unified for image generation)
+        return _SYSTEM_PROMPTS["en_unified"]
+    else:
+        logger.warning(
+            f"Unknown sys_type '{sys_type}', falling back to 'en_unified'."
+        )
+        return _SYSTEM_PROMPTS["en_unified"]
 
 
 def _build_causal_attention_mask(
@@ -549,12 +578,20 @@ class HunyuanImage3AR(PipelineStage):
         do_cfg = guidance_scale > 1.0
         cfg_factor = 2 if do_cfg else 1
 
+        # Get bot_task and sys_type from batch (with defaults)
+        bot_task = getattr(batch, "bot_task", "image")
+        sys_type = getattr(batch, "sys_type", "en_unified")
+        
+        # Handle "none" bot_task (convert to "image" for tokenizer compatibility)
+        if bot_task == "none":
+            bot_task = "image"
+
         # Build tokenizer inputs
         prompts = [batch.prompt] * cfg_factor
         tokenizer_kwargs: dict[str, Any] = dict(
             batch_prompt=prompts,
             mode="gen_image",
-            bot_task="image",
+            bot_task=bot_task,
             sequence_template="instruct",
             cfg_factor=cfg_factor,
             image_base_size=getattr(
@@ -562,10 +599,12 @@ class HunyuanImage3AR(PipelineStage):
             ) and processor.vae_reso_group.base_size,
         )
 
-        # Add system prompt (from generation_config.json: use_system_prompt="en_unified")
+        # Add system prompt based on sys_type
         # This instructs the model on its multimodal capabilities and image generation protocol.
-        system_prompts = [_DEFAULT_SYSTEM_PROMPT] * cfg_factor
-        tokenizer_kwargs["batch_system_prompt"] = system_prompts
+        system_prompt = _get_system_prompt(sys_type)
+        if system_prompt is not None:
+            system_prompts = [system_prompt] * cfg_factor
+            tokenizer_kwargs["batch_system_prompt"] = system_prompts
 
         # Provide gen image info if the tokenizer supports it
         if image_info is not None:
