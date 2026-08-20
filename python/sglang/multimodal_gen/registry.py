@@ -56,6 +56,9 @@ from sglang.multimodal_gen.configs.pipeline_configs.flux import (
 from sglang.multimodal_gen.configs.pipeline_configs.glm_image import (
     GlmImagePipelineConfig,
 )
+from sglang.multimodal_gen.configs.pipeline_configs.hunyuan_image3 import (
+    HunyuanImage3PipelineConfig,
+)
 from sglang.multimodal_gen.configs.pipeline_configs.hunyuan3d import (
     Hunyuan3D2PipelineConfig,
 )
@@ -121,6 +124,9 @@ from sglang.multimodal_gen.configs.sample.flux import (
     FluxSamplingParams,
 )
 from sglang.multimodal_gen.configs.sample.glmimage import GlmImageSamplingParams
+from sglang.multimodal_gen.configs.sample.hunyuan_image3 import (
+    HunyuanImage3SamplingParams,
+)
 from sglang.multimodal_gen.configs.sample.helios import (
     HeliosDistilledSamplingParams,
     HeliosMidSamplingParams,
@@ -1041,6 +1047,21 @@ def _register_configs():
         pipeline_config_cls=GlmImagePipelineConfig,
         model_detectors=[lambda hf_id: "glm-image" in hf_id.lower()],
     )
+
+    # HunyuanImage-3
+    register_configs(
+        sampling_param_cls=HunyuanImage3SamplingParams,
+        pipeline_config_cls=HunyuanImage3PipelineConfig,
+        hf_model_paths=[
+            "tencent/HunyuanImage-3.0-Instruct",
+        ],
+        model_detectors=[
+            lambda hf_id: "hunyuanimage-3" in hf_id.lower()
+            or "hunyuan_image_3" in hf_id.lower()
+            or "hunyuan-image-3" in hf_id.lower()
+        ],
+    )
+
     register_configs(
         sampling_param_cls=Hunyuan3DSamplingParams,
         pipeline_config_cls=Hunyuan3D2PipelineConfig,
