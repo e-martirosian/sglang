@@ -129,9 +129,9 @@ class HunYuanRotary2DEmbedder:
         device = q.device
         cos, sin = self._prepare_cos_sin(custom_pos_emb, first_step, device)
 
+        total_tokens = q.shape[0]
         bs = len(attn_meta.query_lens)
-        q_len = attn_meta.query_lens[0]
-        assert hidden_states.shape[0] == bs * q_len
+        q_len = total_tokens // bs
 
         q = q.reshape(bs, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.reshape(bs, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
@@ -140,12 +140,12 @@ class HunYuanRotary2DEmbedder:
 
         q = (
             q.transpose(1, 2)
-            .reshape(hidden_states.shape[0], self.num_heads * self.head_dim)
+            .reshape(total_tokens, self.num_heads * self.head_dim)
             .to(torch.bfloat16)
         )
         k = (
             k.transpose(1, 2)
-            .reshape(hidden_states.shape[0], self.num_kv_heads * self.head_dim)
+            .reshape(total_tokens, self.num_kv_heads * self.head_dim)
             .to(torch.bfloat16)
         )
 

@@ -305,7 +305,11 @@ class HunyuanImage3AR(PipelineStage):
             num_image_tokens=num_image_tokens,
             first_step=first_step,
         )
-        return output.view(batch_size, seq_len, hidden_size)
+        # Derive reshape dims from actual output (may differ from input
+        # batch_size after TP broadcast).
+        actual_batch = attention_mask.shape[0]
+        actual_seq_len = output.shape[0] // actual_batch
+        return output.view(actual_batch, actual_seq_len, hidden_size)
 
     # ------------------------------------------------------------------
     # Diffusion I/O helpers
