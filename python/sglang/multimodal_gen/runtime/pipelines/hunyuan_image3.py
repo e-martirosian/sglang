@@ -34,10 +34,8 @@ from sglang.multimodal_gen.runtime.pipelines_core import LoRAPipeline
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
     ComposedPipelineBase,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.stages import DenoisingStage
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.hunyuan_image3 import (
     HunyuanImage3AR,
-    HunyuanImage3BeforeDenoisingStage,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
@@ -456,36 +454,15 @@ class HunyuanImage3Pipeline(LoRAPipeline, ComposedPipelineBase):
     # --- pipeline stages -----------------------------------------------------
 
     def create_pipeline_stages(self, server_args: ServerArgs):
-        # Stage 1: AR token generation (text + image tokens)
+        # Stage 1: AR latent generation. Runs the official diffusion loop
+        # with every backbone pass routed into the sglang backbone's
+        # forward_block, and stops before VAE decode.
         self.add_stage(
-            HunyuanImage3AR(
-                processor=self.get_module("processor"),
-                vision_language_encoder=self.get_module("vision_language_encoder"),
-            ),
+            HunyuanImage3AR(ar_model=self.get_module("transformer")),
             "hunyuan_image3_ar",
         )
 
-        # Stage 2: Prepare latents and conditioning before denoising
-        self.add_stage(
-            HunyuanImage3BeforeDenoisingStage(
-                vae=self.get_module("vae"),
-                text_encoder=self.get_module("text_encoder"),
-                tokenizer=self.get_module("tokenizer"),
-                transformer=self.get_module("transformer"),
-                scheduler=self.get_module("scheduler"),
-            ),
-            "hunyuan_image3_before_denoising_stage",
-        )
-
-        # Stage 3: Denoising loop (forward_block)
-        self.add_stage(
-            DenoisingStage(
-                transformer=self.get_module("transformer"),
-                scheduler=self.get_module("scheduler"),
-            ),
-        )
-
-        # Stage 4: VAE decoding
+        # Stage 2: VAE decoding
         self.add_standard_decoding_stage()
 
 
