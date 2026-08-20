@@ -704,8 +704,10 @@ class HunyuanImage3AR(PipelineStage):
         if batch.seed is not None:
             generator.manual_seed(batch.seed)
 
+        # Generate base noise with batch_size=1, then duplicate for CFG
+        # (matching vllm-omni which uses the SAME noise for cond/uncond)
         latents = torch.randn(
-            actual_batch_size,
+            1,
             latent_channels,
             latent_h,
             latent_w,
@@ -723,9 +725,13 @@ class HunyuanImage3AR(PipelineStage):
 
             # Scale model input for scheduler
             latent_model_input = scheduler.scale_model_input(latents, t)
+            # Duplicate latents for CFG (same noise for both branches)
+            if do_cfg:
+                latent_model_input = torch.cat([latent_model_input] * cfg_factor, dim=0)
 
-            # Prepare timestep tensor
-            t_expand = t.repeat(actual_batch_size).to(device)
+            # Prepare timestep tensor – match latent batch size
+            latent_bs = latent_model_input.shape[0]
+            t_expand = t.repeat(latent_bs).to(device)
 
             with torch.autocast(device_type=current_platform.device_type, dtype=torch.bfloat16, enabled=True):
                 if first_step:
@@ -772,13 +778,8 @@ class HunyuanImage3AR(PipelineStage):
             if do_cfg:
                 pred_cond, pred_uncond = pred.chunk(2)
                 pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
-                # Keep single-batch latents
-                pred = pred[:1]
 
-            # Scheduler step – keep only the first branch when CFG doubled
-            # the batch (matching vllm-omni which stores per-request latents).
-            if do_cfg:
-                latents = latents[:1]
+            # Scheduler step (latents is always batch_size=1)
             latent_dtype = latents.dtype
             latents = scheduler.step(pred, t, latents, return_dict=False)[0].to(dtype=latent_dtype)
 
