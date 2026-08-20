@@ -451,10 +451,9 @@ class ImageKVCacheManager:
         self.image_token_len = attn_metadata.num_image_tokens
         first_step = attn_metadata.first_step
 
+        total_tokens = query.shape[0]
         bs = len(attn_metadata.query_lens)
-        q_len = attn_metadata.query_lens[0]
-        seq_len = attn_metadata.seq_lens[0]
-        assert query.shape[0] == bs * q_len
+        q_len = total_tokens // bs
 
         head_num_per_rank = query.shape[1]
         kv_head_num_per_rank = key.shape[1]
@@ -465,12 +464,7 @@ class ImageKVCacheManager:
         key = key.reshape(bs, q_len, kv_head_num_per_rank, head_dim)
         value = value.reshape(bs, q_len, kv_head_num_per_rank, head_dim)
 
-        if first_step:
-            self.image_kv_cache_map = None
-            self._save_image_kv_caches(key, value, seq_len)
-        else:
-            key, value = self._update_image_kv_caches(key, value, seq_len)
-
+        # Full attention every step – no KV cache needed.
         query = query.transpose(1, 2).contiguous()
         key = key.transpose(1, 2).contiguous()
         value = value.transpose(1, 2).contiguous()
@@ -485,5 +479,5 @@ class ImageKVCacheManager:
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bs * q_len, head_num_per_rank, head_dim)
+        attn_output = attn_output.reshape(total_tokens, head_num_per_rank, head_dim)
         return attn_output
