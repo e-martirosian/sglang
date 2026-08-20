@@ -1,6 +1,6 @@
 import inspect
 import time
-from typing import Any, Iterator, List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -109,21 +109,15 @@ class HunyuanImage3AR(PipelineStage):
     def parallelism_type(self) -> StageParallelismType:
         return StageParallelismType.MAIN_RANK_ONLY_AND_SEND_TO_OTHERS
 
-    async def process_batch(self, batch: Req, server_args: ServerArgs) -> Req:
-        """Process a single batch through AR generation."""
+    def forward(self, batch: Req, server_args: ServerArgs) -> Req:
+        """Forward pass of AR generation for a single batch."""
         # TODO: Implement AR token generation
         # This is a placeholder - actual implementation requires:
         # 1. Tokenize prompt using custom tokenizer
         # 2. Run AR model to generate text + image tokens
         # 3. Extract image tokens for denoising
-        logger.warning("HunyuanImage3AR.process_batch is not yet implemented")
+        logger.warning("HunyuanImage3AR.forward is not yet implemented")
         return batch
-
-    async def __call__(self, batch_iterator: Iterator[Req], server_args: ServerArgs):
-        """Process batches through AR generation."""
-        async for batch in batch_iterator:
-            batch = await self.process_batch(batch, server_args)
-            yield batch
 
 
 class HunyuanImage3BeforeDenoisingStage(PipelineStage):
@@ -201,8 +195,8 @@ class HunyuanImage3BeforeDenoisingStage(PipelineStage):
         )
         return latents
 
-    async def process_batch(self, batch: Req, server_args: ServerArgs) -> Req:
-        """Process a single batch before denoising."""
+    def forward(self, batch: Req, server_args: ServerArgs) -> Req:
+        """Forward pass preparing a single batch for denoising."""
         device = get_local_torch_device()
         dtype = get_module_dtype(self.transformer)
 
@@ -239,9 +233,3 @@ class HunyuanImage3BeforeDenoisingStage(PipelineStage):
         batch.num_inference_steps = num_inference_steps
 
         return batch
-
-    async def __call__(self, batch_iterator: Iterator[Req], server_args: ServerArgs):
-        """Process batches before denoising."""
-        async for batch in batch_iterator:
-            batch = await self.process_batch(batch, server_args)
-            yield batch
