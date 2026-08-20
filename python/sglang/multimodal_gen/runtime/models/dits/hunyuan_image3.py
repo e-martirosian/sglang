@@ -20,8 +20,10 @@ is a diffusion model, not an LLM serving model.
 Ported from the vLLM implementation
 (`vllm/model_executor/models/hunyuan_image3.py`).
 
-Uses srt layers for TP/EP parallelism, MoE, and attention where multimodal_gen
-does not yet provide direct equivalents.
+Uses multimodal_gen layers for TP parallelism, attention, RoPE and
+embeddings. The fused-MoE stack (FusedMoE/TopK and its parallel context)
+still comes from srt because multimodal_gen does not yet provide a fused
+MoE layer of its own.
 """
 
 import re
@@ -31,32 +33,34 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from sglang.srt.distributed import (
-    moe_expert_parallel_all_reduce,
-    moe_tensor_model_parallel_all_reduce,
+# The fused-MoE stack has no multimodal_gen equivalent yet (mm's own
+# MoE blocks also delegate to srt), so these imports stay on srt.
+from sglang.srt.layers.moe import should_skip_post_experts_all_reduce
+from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
+from sglang.srt.layers.moe.topk import TopK
+from sglang.srt.runtime_context import get_parallel
+
+from sglang.multimodal_gen.runtime.distributed import (
+    get_tp_rank,
+    get_tp_world_size,
+    tensor_model_parallel_all_reduce,
 )
-from sglang.srt.layers.linear import (
+from sglang.multimodal_gen.runtime.layers.activation import SiluAndMul
+from sglang.multimodal_gen.runtime.layers.attention import LocalAttention
+from sglang.multimodal_gen.runtime.layers.layernorm import RMSNorm
+from sglang.multimodal_gen.runtime.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
-from sglang.srt.layers.moe import should_skip_post_experts_all_reduce
-from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
-from sglang.srt.layers.moe.topk import TopK
-from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.layers.rotary_embedding import get_rope
-from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.runtime_context import get_parallel
-
-from sglang.multimodal_gen.runtime.layers.activation import SiluAndMul
-from sglang.multimodal_gen.runtime.layers.layernorm import RMSNorm
+from sglang.multimodal_gen.runtime.layers.quantization import QuantizationConfig
+from sglang.multimodal_gen.runtime.layers.rotary_embedding import get_rope
 from sglang.multimodal_gen.runtime.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
-from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
+from sglang.multimodal_gen.runtime.loader.weight_utils import default_weight_loader
 from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.configs.models.dits.hunyuan_image3 import HunyuanImage3DitConfig
 
@@ -188,7 +192,7 @@ class HunYuanAttention(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        tp_size = get_parallel().tp_size
+        tp_size = get_tp_world_size()
         self.hidden_size = hidden_size
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
@@ -227,13 +231,12 @@ class HunYuanAttention(nn.Module):
         self.rotary_emb = _make_rope(
             config, self.head_dim, rope_theta, rope_scaling, max_position_embeddings
         )
-        self.attn = RadixAttention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
+        self.attn = LocalAttention(
+            num_heads=self.num_heads,
+            head_size=self.head_dim,
             num_kv_heads=self.num_kv_heads,
-            layer_id=layer_id,
-            prefix=f"{prefix}.attn",
+            softmax_scale=self.scaling,
+            causal=True,
         )
 
         self.image_attn = ImageKVCacheManager(image_token_len=4097)
@@ -275,9 +278,10 @@ class HunYuanAttention(nn.Module):
         if attn_meta is not None:
             attn_output = self.image_attn(q, k, v, attn_meta, attention_mask=attention_mask)
         else:
-            q = q.view(-1, self.q_size)
-            k = k.view(-1, self.kv_size)
-            attn_output = self.attn(q, k, v, forward_batch)
+            q = q.view(-1, self.num_heads, self.head_dim)
+            k = k.view(-1, self.num_kv_heads, self.head_dim)
+            v = v.view(-1, self.num_kv_heads, self.head_dim)
+            attn_output = self.attn(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0))
 
         attn_output = attn_output.view(q.shape[0], -1)
         output, _ = self.o_proj(attn_output)
@@ -302,7 +306,7 @@ class HunYuanCrossAttention(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        tp_size = get_parallel().tp_size
+        tp_size = get_tp_world_size()
         self.hidden_size = hidden_size
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
@@ -333,10 +337,12 @@ class HunYuanCrossAttention(nn.Module):
         self.rotary_emb = _make_rope(
             config, self.head_dim, rope_theta, rope_scaling, max_position_embeddings
         )
-        self.attn = RadixAttention(
-            self.num_heads, self.head_dim, self.scaling,
-            num_kv_heads=self.num_kv_heads, layer_id=layer_id,
-            prefix=f"{prefix}.attn",
+        self.attn = LocalAttention(
+            num_heads=self.num_heads,
+            head_size=self.head_dim,
+            num_kv_heads=self.num_kv_heads,
+            softmax_scale=self.scaling,
+            causal=True,
         )
 
         self.image_attn = ImageKVCacheManager(image_token_len=4097)
@@ -374,9 +380,10 @@ class HunYuanCrossAttention(nn.Module):
         if attn_meta is not None:
             attn_output = self.image_attn(q, k, v, attn_meta, attention_mask=attention_mask)
         else:
-            q = q.view(-1, self.q_size)
-            k = k.view(-1, self.kv_size)
-            attn_output = self.attn(q, k, v, forward_batch)
+            q = q.view(-1, self.num_heads, self.head_dim)
+            k = k.view(-1, self.num_kv_heads, self.head_dim)
+            v = v.view(-1, self.num_kv_heads, self.head_dim)
+            attn_output = self.attn(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0))
 
         attn_output = attn_output.view(q.shape[0], -1)
         output, _ = self.o_proj(attn_output)
@@ -390,8 +397,9 @@ class HunYuanSparseMoeBlock(nn.Module):
     ):
         super().__init__()
         assert layer_id >= 0
-        self.tp_size = get_parallel().moe_tp_size
-        self.ep_size = get_parallel().moe_ep_size
+        # Diffusion shards experts over TP only; there is no EP/DP axis.
+        self.tp_size = get_tp_world_size()
+        tp_rank = get_tp_rank()
         self.n_routed_experts = config.num_experts
 
         top_k = _get_layer_value(config, "moe_topk", layer_id)
@@ -424,12 +432,22 @@ class HunYuanSparseMoeBlock(nn.Module):
         else:
             self.shared_mlp = None
 
-        self.experts = FusedMoE(
-            num_experts=self.n_routed_experts, top_k=top_k,
-            hidden_size=config.hidden_size, intermediate_size=intermediate_size,
-            reduce_results=False, layer_id=layer_id,
-            quant_config=quant_config, prefix=f"{prefix}.experts",
-        )
+        # srt's FusedMoE/dispatcher read srt's MoE parallel context at
+        # construction, which is never initialized for diffusion (no srt
+        # scheduler). Publish the diffusion topology via override: experts
+        # are TP-sharded (moe_tp == TP) and EP stays degenerate (size 1).
+        with get_parallel().override(
+            moe_ep_size=1,
+            moe_ep_rank=0,
+            moe_tp_size=self.tp_size,
+            moe_tp_rank=tp_rank,
+        ):
+            self.experts = FusedMoE(
+                num_experts=self.n_routed_experts, top_k=top_k,
+                hidden_size=config.hidden_size, intermediate_size=intermediate_size,
+                reduce_results=False, layer_id=layer_id,
+                quant_config=quant_config, prefix=f"{prefix}.experts",
+            )
 
     def forward(self, hidden_states):
         orig_shape = hidden_states.shape
@@ -444,10 +462,8 @@ class HunYuanSparseMoeBlock(nn.Module):
         if self.shared_mlp is not None:
             final_hidden_states = final_hidden_states + self.shared_mlp(hidden_states)
 
-        if self.ep_size > 1 and not should_skip_post_experts_all_reduce(is_tp_path=False):
-            final_hidden_states = moe_expert_parallel_all_reduce(final_hidden_states)
         if self.tp_size > 1 and not should_skip_post_experts_all_reduce(is_tp_path=True):
-            final_hidden_states = moe_tensor_model_parallel_all_reduce(final_hidden_states)
+            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(orig_shape)
 
@@ -638,8 +654,11 @@ class HunyuanImage3ForCausalMM(CachableDiT):
             hf_config, prefix=f"{prefix}.model",
         )
         self.unpadded_vocab_size = hf_config.vocab_size
-        self.lm_head = ParallelLMHead(
+        # multimodal_gen has no dedicated LM-head layer; the vocab-parallel
+        # embedding shares its layout and only `.weight` is consumed downstream.
+        self.lm_head = VocabParallelEmbedding(
             self.unpadded_vocab_size, hf_config.hidden_size,
+            org_num_embeddings=self.unpadded_vocab_size,
             prefix=f"{prefix}.lm_head",
         )
         if getattr(hf_config, "tie_word_embeddings", False):
