@@ -1,23 +1,29 @@
 import json
 import os
+from itertools import chain
 from typing import Any
 
 import requests
 import torch
+from torch.distributed import init_device_mesh
+from torch.distributed.fsdp import MixedPrecisionPolicy
 
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.layers.attention.selector import (
     component_attn_backend_context_manager,
 )
-from sglang.multimodal_gen.runtime.loader.fsdp_load import maybe_load_fsdp_model
+from sglang.multimodal_gen.runtime.loader.fsdp_load import shard_model
 from sglang.multimodal_gen.runtime.loader.transformer_load_utils import (
     resolve_transformer_safetensors_to_load,
 )
-from sglang.multimodal_gen.runtime.loader.utils import _list_safetensors_files
-from sglang.multimodal_gen.runtime.loader.weight_load_plan import WeightLoadPlan
+from sglang.multimodal_gen.runtime.loader.utils import (
+    _list_safetensors_files,
+    set_default_torch_dtype,
+)
 from sglang.multimodal_gen.runtime.loader.weight_utils import (
     safetensors_weights_iterator,
 )
+from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.models.dits.hunyuan_image3 import (
     HunyuanImage3ForCausalMM,
 )
@@ -40,6 +46,7 @@ from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.precision_types import PRECISION_TO_TYPE
+from sglang.multimodal_gen.utils import set_mixed_precision_policy
 
 logger = init_logger(__name__)
 
@@ -184,7 +191,14 @@ class HunyuanImage3Pipeline(LoRAPipeline, ComposedPipelineBase):
         model_path: str,
         config_dict: dict[str, Any],
     ) -> torch.nn.Module:
-        """Load the unified AR backbone (also serves as the DiT) via FSDP/TP machinery."""
+        """Load the unified AR backbone (also serves as the DiT).
+
+        The official checkpoint ships fused/interleaved layouts (per-group
+        interleaved QKV, [up; gate] fused projections, individual per-expert
+        tensors) that the generic state-dict mapper does not understand, so
+        the weights are loaded through the model's own vLLM-style
+        ``load_weights``, which converts all of them natively.
+        """
         safetensors_list = resolve_transformer_safetensors_to_load(
             server_args, model_path
         )
@@ -195,14 +209,10 @@ class HunyuanImage3Pipeline(LoRAPipeline, ComposedPipelineBase):
         checkpoint_load_device = (
             torch.device("cpu") if cpu_offload else local_torch_device
         )
-        weight_load_plan = WeightLoadPlan.for_component(
-            checkpoint_load_device=checkpoint_load_device,
-            needs_device_weight_postprocess=False,
-            component_cpu_offload=cpu_offload,
-            load_full_state_dict_on_device=bool(
-                server_args.direct_gpu_weight_loading
-            ),
-        )
+        fsdp_inference = bool(server_args.use_fsdp_inference)
+        if fsdp_inference and current_platform.is_mps():
+            logger.warning("Disabling FSDP for MPS platform as it's not compatible")
+            fsdp_inference = False
 
         param_dtype = PRECISION_TO_TYPE[pipeline_config.dit_precision]
         logger.info(
@@ -217,28 +227,86 @@ class HunyuanImage3Pipeline(LoRAPipeline, ComposedPipelineBase):
         with component_attn_backend_context_manager(
             attn_backend, component_name=matched_backend_key or "transformer"
         ):
-            model = maybe_load_fsdp_model(
-                model_cls=HunyuanImage3ForCausalMM,
-                init_params={
-                    "config": pipeline_config.dit_config,
-                    "hf_config": config_dict,
-                },
-                weight_dir_list=safetensors_list,
-                device=local_torch_device,
-                hsdp_replicate_dim=server_args.hsdp_replicate_dim,
-                hsdp_shard_dim=server_args.hsdp_shard_dim,
-                cpu_offload=cpu_offload,
-                pin_cpu_memory=server_args.pin_cpu_memory,
-                fsdp_inference=bool(server_args.use_fsdp_inference),
-                param_dtype=param_dtype,
-                reduce_dtype=torch.float32,
-                output_dtype=None,
-                strict=False,
-                weight_load_plan=weight_load_plan,
+            with set_default_torch_dtype(param_dtype), torch.device(
+                checkpoint_load_device
+            ):
+                model = HunyuanImage3ForCausalMM(
+                    config=pipeline_config.dit_config,
+                    hf_config=config_dict,
+                )
+
+            weights_to_load = {name for name, _ in model.named_parameters()}
+            loaded_weights = model.load_weights(
+                safetensors_weights_iterator(safetensors_list)
             )
+            weights_not_loaded = weights_to_load - (loaded_weights or set())
+            if weights_not_loaded:
+                raise ValueError(
+                    "Following HunyuanImage-3 AR weights were not initialized "
+                    f"from checkpoint: {sorted(weights_not_loaded)}. This usually "
+                    "indicates a checkpoint/model-arch mismatch or a broken "
+                    "weight-name mapping."
+                )
+
+            # Post-load fixups normally performed by maybe_load_fsdp_model.
+            for _, module in model.named_modules():
+                quant_method = getattr(module, "quant_method", None)
+                if quant_method is not None and hasattr(
+                    quant_method, "process_weights_after_loading"
+                ):
+                    quant_method.process_weights_after_loading(module)
+            model.post_load_weights()
+            for name, param in chain(model.named_parameters(), model.named_buffers()):
+                if param.is_meta:
+                    raise RuntimeError(
+                        f"Unexpected param or buffer {name} on meta device."
+                    )
+                if isinstance(param, torch.nn.Parameter):
+                    param.requires_grad = False
+
+            if fsdp_inference:
+                self._shard_ar_model(
+                    model,
+                    server_args=server_args,
+                    cpu_offload=cpu_offload,
+                    param_dtype=param_dtype,
+                )
         model.eval()
         self.memory_usages["transformer"] = _module_memory_gb(model)
         return model
+
+    def _shard_ar_model(
+        self,
+        model: torch.nn.Module,
+        server_args: ServerArgs,
+        cpu_offload: bool,
+        param_dtype: torch.dtype,
+    ) -> None:
+        """Apply FSDP sharding to the already-loaded AR backbone."""
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=param_dtype,
+            reduce_dtype=torch.float32,
+            cast_forward_inputs=False,
+        )
+        set_mixed_precision_policy(
+            param_dtype=param_dtype,
+            reduce_dtype=torch.float32,
+            mp_policy=mp_policy,
+        )
+        device_mesh = init_device_mesh(
+            current_platform.device_type,
+            mesh_shape=(server_args.hsdp_replicate_dim, server_args.hsdp_shard_dim),
+            mesh_dim_names=("replicate", "shard"),
+        )
+        shard_model(
+            model,
+            cpu_offload=cpu_offload,
+            reshard_after_forward=True,
+            mp_policy=mp_policy,
+            mesh=device_mesh,
+            fsdp_shard_conditions=getattr(model, "_fsdp_shard_conditions", None),
+            pin_cpu_memory=server_args.pin_cpu_memory,
+        )
 
     def _load_vae(
         self,

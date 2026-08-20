@@ -86,12 +86,6 @@ UNEXPECTED_KEYWORDS = [
     "timestep_r_emb",
 ]
 
-# Per-expert routed weights shipped as individual tensors in the checkpoint.
-_EXPERT_WEIGHT_RE = re.compile(
-    r"^(?P<prefix>.+\.mlp\.experts\.)(?P<expert>\d+)\."
-    r"(?P<kind>gate_and_up_proj|down_proj)\.weight$"
-)
-
 
 def _is_moe(config: PretrainedConfig) -> bool:
     num_experts = getattr(config, "num_experts", None)
@@ -396,50 +390,6 @@ class HunYuanCrossAttention(nn.Module):
         return output, (ori_k, v)
 
 
-def _make_full_expert_weight_loader(experts: FusedMoE, shard: str):
-    """Build a two-arg weight loader feeding FusedMoE expert parameters.
-
-    ``preprocess_loaded_state_dict`` emits ``w13_weight`` as [E, 2I, H] with
-    the halves ordered gate(w1) then up(w3), and ``w2_weight`` as [E, H, I].
-    Diffusion runs experts with EP=1 and TP-sharded intermediates, so each
-    rank keeps its slice of both w13 halves / of the w2 input dim. Runners
-    that store w13 as [up; gate] (e.g. flashinfer CUTLASS) get the halves
-    swapped on write.
-    """
-    tp_rank = experts.moe_tp_rank
-    up_first = bool(
-        getattr(experts.quant_method, "load_up_proj_weight_first", False)
-    )
-
-    if shard == "w13":
-
-        def weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
-            half = loaded_weight.shape[1] // 2
-            first, second = loaded_weight[:, :half], loaded_weight[:, half:]
-            if up_first:
-                first, second = second, first
-            if tuple(param.shape) != tuple(loaded_weight.shape):
-                # TP-sharded experts: keep this rank's slice of each half.
-                local_half = param.shape[1] // 2
-                lo = tp_rank * local_half
-                hi = lo + local_half
-                first, second = first[:, lo:hi], second[:, lo:hi]
-            param.data.copy_(torch.cat((first, second), dim=1))
-
-    else:  # w2: down_proj, TP-sharded along the input (intermediate) dim
-
-        def weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
-            if tuple(param.shape) == tuple(loaded_weight.shape):
-                param.data.copy_(loaded_weight)
-                return
-            local_inter = param.shape[2]
-            lo = tp_rank * local_inter
-            hi = lo + local_inter
-            param.data.copy_(loaded_weight[:, :, lo:hi])
-
-    return weight_loader
-
-
 class HunYuanSparseMoeBlock(nn.Module):
     def __init__(
         self, config: PretrainedConfig, layer_id: int,
@@ -498,33 +448,6 @@ class HunYuanSparseMoeBlock(nn.Module):
                 reduce_results=False, layer_id=layer_id,
                 quant_config=quant_config, prefix=f"{prefix}.experts",
             )
-        self._install_full_expert_weight_loaders()
-
-    def _install_full_expert_weight_loaders(self) -> None:
-        """Expose two-arg weight loaders for the fused expert tensors.
-
-        The multimodal_gen state-dict loader invokes
-        ``param.weight_loader(param, tensor)`` with the full (all-experts)
-        tensor produced by ``preprocess_loaded_state_dict``, while srt's
-        FusedMoE loader expects per-expert ``(weight_name, shard_id,
-        expert_id)`` arguments. For the plain unquantized layout we
-        replicate the TP sharding here instead.
-        """
-        experts = self.experts
-        if getattr(experts, "quant_config", None) is not None:
-            # quantized experts keep the native per-expert loader
-            return
-        if getattr(experts, "use_triton_kernels", False):
-            raise NotImplementedError(
-                "HunyuanImage-3 state-dict loading does not support the "
-                "transposed triton-kernels expert layout."
-            )
-        for param_name, shard in (("w13_weight", "w13"), ("w2_weight", "w2")):
-            param = getattr(experts, param_name, None)
-            if isinstance(param, nn.Parameter):
-                param.weight_loader = _make_full_expert_weight_loader(
-                    experts, shard
-                )
 
     def forward(self, hidden_states):
         orig_shape = hidden_states.shape
@@ -719,9 +642,6 @@ class HunyuanImage3Model(nn.Module):
 class HunyuanImage3ForCausalMM(CachableDiT):
     """Top-level HunyuanImage-3 model for diffusion pipeline."""
 
-    param_names_mapping = HunyuanImage3DitConfig().arch_config.param_names_mapping
-    reverse_param_names_mapping = {}
-
     def __init__(
         self, config: HunyuanImage3DitConfig, prefix: str = "", **kwargs,
     ):
@@ -767,73 +687,6 @@ class HunyuanImage3ForCausalMM(CachableDiT):
         self.lm_head.weight = head
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
-
-    def preprocess_loaded_state_dict(
-        self, weight_iterator: Iterable[Tuple[str, torch.Tensor]]
-    ):
-        """Convert HunyuanImage-3 checkpoint tensors to this model's layout.
-
-        - ``self_attn.qkv_proj``: the checkpoint interleaves Q/K/V heads per
-          KV group; ``QKVParallelLinear`` expects contiguous [Q; K; V].
-        - ``shared_mlp.gate_and_up_proj``: the checkpoint packs [up; gate];
-          the fused ``gate_up_proj`` is [gate; up].
-        - ``mlp.experts.{i}``: per-expert ``gate_and_up_proj``/``down_proj``
-          tensors are packed into FusedMoE's fused ``w13_weight`` (halves
-          ordered gate(w1) then up(w3)) and ``w2_weight``.
-        """
-        num_experts = self.hf_config.num_experts
-        # (layer prefix, kind) -> [packed output tensor, filled expert count]
-        expert_buffers: dict = {}
-
-        for name, tensor in weight_iterator:
-            if name.endswith(".self_attn.qkv_proj.weight"):
-                # checkpoint stores Q/K/V interleaved per KV group
-                yield name, self.model._split_qkv_weight(tensor)
-                continue
-
-            if name.endswith(".shared_mlp.gate_and_up_proj.weight"):
-                half = tensor.shape[0] // 2
-                packed = torch.cat((tensor[half:], tensor[:half]), dim=0)
-                yield name.replace("gate_and_up_proj", "gate_up_proj"), packed
-                continue
-
-            expert_match = _EXPERT_WEIGHT_RE.match(name)
-            if expert_match is not None:
-                prefix = expert_match.group("prefix")
-                expert_id = int(expert_match.group("expert"))
-                kind = expert_match.group("kind")
-                entry = expert_buffers.get((prefix, kind))
-                if entry is None:
-                    packed = torch.empty(
-                        (num_experts, *tensor.shape),
-                        dtype=tensor.dtype,
-                        device=tensor.device,
-                    )
-                    entry = [packed, 0]
-                    expert_buffers[(prefix, kind)] = entry
-                if kind == "gate_and_up_proj":
-                    # checkpoint packs [up; gate]; w13 expects [gate; up]
-                    half = tensor.shape[0] // 2
-                    entry[0][expert_id, :half] = tensor[half:]
-                    entry[0][expert_id, half:] = tensor[:half]
-                else:
-                    entry[0][expert_id] = tensor
-                entry[1] += 1
-                if entry[1] == num_experts:
-                    target = (
-                        "w13_weight" if kind == "gate_and_up_proj" else "w2_weight"
-                    )
-                    yield f"{prefix}{target}", entry[0]
-                    del expert_buffers[(prefix, kind)]
-                continue
-
-            yield name, tensor
-
-        if expert_buffers:
-            raise ValueError(
-                "Incomplete expert weights while packing FusedMoE tensors: "
-                f"{sorted(expert_buffers)}"
-            )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [

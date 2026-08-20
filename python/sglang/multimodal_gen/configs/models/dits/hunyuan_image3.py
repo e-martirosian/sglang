@@ -3,31 +3,6 @@ from dataclasses import dataclass, field
 from sglang.multimodal_gen.configs.models.dits.base import DiTArchConfig, DiTConfig
 
 
-def _build_hunyuan_image3_param_names_mapping() -> dict:
-    """Map HunyuanImage-3 checkpoint names to the sglang model namespace.
-
-    Source keys (official checkpoint) -> target keys (sglang model):
-        model.wte.weight                          -> model.embed_tokens.weight
-        model.ln_f.weight                         -> model.norm.weight
-        model.layers.X.mlp.gate.wg.weight         -> model.layers.X.mlp.gate.weight
-
-    Tensor-level conversions (interleaved qkv_proj, fused gate_and_up_proj,
-    per-expert packing) are applied by the model's
-    ``preprocess_loaded_state_dict``. Non-AR components (VAE / ViT / diffusion
-    head) are loaded by separate pipeline modules and skipped here.
-    """
-    return {
-        # GPT-style backbone names in the checkpoint.
-        r"^model\.wte\.(.*)$": r"model.embed_tokens.\1",
-        r"^model\.ln_f\.(.*)$": r"model.norm.\1",
-        # The MoE router is stored as `mlp.gate.wg` in the checkpoint.
-        r"^(.*\.mlp\.gate)\.wg\.(.*)$": r"\1.\2",
-        # Non-AR components are loaded separately.
-        r"^(vae|vision_model|vision_aligner|final_layer|patch_embed"
-        r"|time_embed(?:_\d+)?|timestep_emb)\..*$": "",
-    }
-
-
 @dataclass
 class HunyuanImage3ArchConfig(DiTArchConfig):
     """Architecture config for HunyuanImage-3 AR transformer backbone."""
@@ -66,9 +41,7 @@ class HunyuanImage3ArchConfig(DiTArchConfig):
 
     stacked_params_mapping: list[tuple[str, str, str]] = field(default_factory=list)
 
-    param_names_mapping: dict = field(
-        default_factory=_build_hunyuan_image3_param_names_mapping
-    )
+    param_names_mapping: dict = field(default_factory=dict)
 
     def __post_init__(self):
         super().__post_init__()
