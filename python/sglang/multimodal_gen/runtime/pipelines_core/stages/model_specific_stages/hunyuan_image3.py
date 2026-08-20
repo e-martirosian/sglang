@@ -684,7 +684,10 @@ class HunyuanImage3AR(PipelineStage):
 
         # The decoding stage expects: latents = (raw_latents - shift) * scaling_factor
         # so that decode does: raw_latents = latents / scaling_factor + shift
-        batch.latents = ((latents.float() - shift) * scaling_factor).to(torch.bfloat16)
+        # The 3D VAE (AutoencoderKLConv3D) expects 5-D input [B, C, T, H, W],
+        # so we unsqueeze a temporal dimension at dim 2.
+        final_latents = ((latents.float() - shift) * scaling_factor).to(torch.bfloat16)
+        batch.latents = final_latents.unsqueeze(2)
 
         logger.info(
             "HunyuanImage3AR produced latents %s for %dx%d image",
