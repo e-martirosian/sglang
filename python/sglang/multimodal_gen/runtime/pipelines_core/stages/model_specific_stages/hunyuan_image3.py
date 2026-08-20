@@ -46,6 +46,12 @@ _SHELL_ACCELERATOR_MODULES = (
     "lm_head",
 )
 
+# AR submodules whose weights the sglang backbone (ar_model) already holds.
+# Whenever the backbone is unsharded and resident on the local accelerator,
+# the shell shares these tensors instead of re-reading the checkpoint, so
+# the AR model is only loaded once.
+_SHELL_AR_SHARED_MODULES = ("model.wte", "model.ln_f", "lm_head")
+
 
 def _shell_inner_forward(agent, *args, **kwargs):
     """Replacement for the shell's inner model forward.
@@ -88,11 +94,14 @@ class HunyuanImage3AR(PipelineStage):
     Args:
         ar_model: The sglang-loaded HunyuanImage-3 backbone, providing
             ``forward_block``.
+        vae: The pipeline-loaded VAE module. Shared with the shell so its
+            weights are not loaded a second time.
     """
 
-    def __init__(self, ar_model):
+    def __init__(self, ar_model, vae=None):
         super().__init__()
         self.ar_model = ar_model
+        self._vae = vae
         self._shell = None
 
     def component_uses(
@@ -134,13 +143,29 @@ class HunyuanImage3AR(PipelineStage):
             revision=server_args.revision,
         )
 
-        device_str = str(get_local_torch_device())
+        device = get_local_torch_device()
+        device_str = str(device)
+        # Reuse the weights already loaded by the pipeline instead of
+        # reading them from the checkpoint a second time.
+        shared_ar = self._shareable_ar_tensors(device)
+        share_vae = self._shareable_vae(device)
+        if shared_ar:
+            logger.info(
+                "Sharing AR weights with the shell model (skipping re-load): %s",
+                sorted(shared_ar),
+            )
+        if share_vae:
+            logger.info("Sharing the pipeline VAE module with the shell model")
+
         # Note: the vae must share the accelerator device with the model;
         # diffusers' DiffusionPipeline.device rejects mixed-device modules,
         # even though decode itself is intercepted and never executed.
-        device_map = {"model.layers": "meta", "vae": device_str}
+        device_map = {
+            "model.layers": "meta",
+            "vae": "meta" if share_vae else device_str,
+        }
         for name in _SHELL_ACCELERATOR_MODULES:
-            device_map[name] = device_str
+            device_map[name] = "meta" if name in shared_ar else device_str
 
         load_kwargs = dict(
             attn_implementation="sdpa",
@@ -163,6 +188,9 @@ class HunyuanImage3AR(PipelineStage):
             shell = shell_cls.from_pretrained(
                 model_path, device_map=device_map, **load_kwargs
             )
+        self._bind_shared_shell_weights(shell, shared_ar, device)
+        if share_vae:
+            shell.vae = self._vae
         shell.load_tokenizer(model_path)
 
         # The backbone layers are never executed: every backbone call is
@@ -175,6 +203,92 @@ class HunyuanImage3AR(PipelineStage):
         self._shell = shell
         logger.info("HunyuanImage-3 shell model ready (backbone delegated to sglang)")
         return shell
+
+    # --- weight sharing with pipeline-loaded components ----------------------
+
+    @staticmethod
+    def _same_device(tensor: torch.Tensor, device: torch.device) -> bool:
+        return tensor.device.type == device.type and (
+            tensor.device.index or 0
+        ) == (device.index or 0)
+
+    def _shareable_ar_tensors(
+        self, device: torch.device
+    ) -> dict[str, torch.Tensor]:
+        """AR embedding/norm/head tensors already resident in the sglang backbone.
+
+        Sharing them with the shell avoids loading the AR weights a second
+        time. This is only safe when the backbone is not sharded (TP/FSDP)
+        and lives on the local accelerator; otherwise an empty dict is
+        returned and the shell loads these modules from the checkpoint.
+        """
+        try:
+            from torch.distributed.tensor import DTensor
+        except ImportError:
+            DTensor = ()  # type: ignore[assignment]
+
+        ar = self.ar_model
+        shared: dict[str, torch.Tensor] = {}
+        if not isinstance(ar, torch.nn.Module):
+            return shared
+        try:
+            candidates = {
+                "model.wte": ar.model.embed_tokens.weight,
+                "model.ln_f": ar.model.norm.weight,
+                "lm_head": ar.lm_head.weight,
+            }
+            vocab_size = getattr(ar, "unpadded_vocab_size", None)
+        except AttributeError:
+            return shared
+
+        for name, tensor in candidates.items():
+            if not isinstance(tensor, torch.Tensor) or isinstance(tensor, DTensor):
+                continue
+            if not self._same_device(tensor, device):
+                continue
+            # VocabParallelEmbedding may pad the vocab dimension; the shell
+            # expects the exact vocab size, so fall back to checkpoint load.
+            if name in ("model.wte", "lm_head") and (
+                vocab_size is None or tensor.shape[0] != vocab_size
+            ):
+                continue
+            shared[name] = tensor
+        return shared
+
+    def _shareable_vae(self, device: torch.device) -> bool:
+        """Whether the pipeline-loaded VAE can be shared with the shell."""
+        vae = self._vae
+        if not isinstance(vae, torch.nn.Module):
+            return False
+        try:
+            param = next(vae.parameters())
+        except StopIteration:
+            return False
+        return self._same_device(param, device)
+
+    def _bind_shared_shell_weights(
+        self,
+        shell: torch.nn.Module,
+        shared_ar: dict[str, torch.Tensor],
+        device: torch.device,
+    ) -> None:
+        """Materialize meta-placed shell params from the sglang backbone."""
+        if not shared_ar:
+            return
+        from accelerate.utils import set_module_tensor_to_device
+
+        for name, tensor in shared_ar.items():
+            param_name = f"{name}.weight"
+            meta_param = shell.get_parameter(param_name)
+            if meta_param.shape != tensor.shape:
+                raise RuntimeError(
+                    f"Cannot share AR weight {param_name} with the shell: "
+                    f"shape {tuple(tensor.shape)} does not match the shell's "
+                    f"{tuple(meta_param.shape)}."
+                )
+            set_module_tensor_to_device(
+                shell, param_name, device, value=tensor.data
+            )
 
     # --- backbone routing -----------------------------------------------------
 

@@ -456,9 +456,14 @@ class HunyuanImage3Pipeline(LoRAPipeline, ComposedPipelineBase):
     def create_pipeline_stages(self, server_args: ServerArgs):
         # Stage 1: AR latent generation. Runs the official diffusion loop
         # with every backbone pass routed into the sglang backbone's
-        # forward_block, and stops before VAE decode.
+        # forward_block, and stops before VAE decode. The AR stage shares
+        # the pipeline-loaded AR weights and VAE with its official shell
+        # model, so neither is loaded twice.
         self.add_stage(
-            HunyuanImage3AR(ar_model=self.get_module("transformer")),
+            HunyuanImage3AR(
+                ar_model=self.get_module("transformer"),
+                vae=self.get_module("vae"),
+            ),
             "hunyuan_image3_ar",
         )
 
