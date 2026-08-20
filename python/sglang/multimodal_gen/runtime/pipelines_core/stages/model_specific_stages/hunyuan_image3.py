@@ -16,7 +16,6 @@ from sglang.multimodal_gen.configs.sample.hunyuan_image3 import (
     align_hunyuan_image3_resolution,
 )
 from sglang.multimodal_gen.runtime.distributed import (
-    get_local_torch_device,
     get_tp_group,
     model_parallel_is_initialized,
 )
@@ -446,7 +445,9 @@ class HunyuanImage3AR(PipelineStage):
             image_info = None
 
         num_image_tokens = token_h * token_w
-        device = get_local_torch_device()
+        # Derive device from model weights to avoid mismatches between
+        # get_local_torch_device() and the actual model placement.
+        device = self.ar_model.model.embed_tokens.weight.device
 
         # 3. Build input sequence using the custom tokenizer
         batch_size = 1
@@ -572,7 +573,7 @@ class HunyuanImage3AR(PipelineStage):
             # Prepare timestep tensor
             t_expand = t.repeat(actual_batch_size).to(device)
 
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=True):
                 if first_step:
                     # Embed text tokens
                     hidden_states = self.ar_model.model.get_input_embeddings(input_ids)
