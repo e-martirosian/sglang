@@ -675,19 +675,13 @@ class HunyuanImage3AR(PipelineStage):
                 # Non-first steps use a different sequence length, but the
                 # forward_block handles this via the attn_meta mechanism.
 
-        # 9. Store latents for the decoding stage
-        # Apply VAE scaling/shift (inverse of what the decoding stage will do)
-        vae_config = self._vae.config if self._vae is not None else None
-        scaling_factor = float(getattr(vae_config, "scaling_factor", 1.0) or 1.0)
-        shift_factor = getattr(vae_config, "shift_factor", None)
-        shift = float(shift_factor) if shift_factor else 0.0
-
-        # The decoding stage expects: latents = (raw_latents - shift) * scaling_factor
-        # so that decode does: raw_latents = latents / scaling_factor + shift
-        # The 3D VAE (AutoencoderKLConv3D) expects 5-D input [B, C, T, H, W],
-        # so we unsqueeze a temporal dimension at dim 2.
-        final_latents = ((latents.float() - shift) * scaling_factor).to(torch.bfloat16)
-        batch.latents = final_latents.unsqueeze(2)
+        # 9. Store latents for the decoding stage.
+        # The denoising loop produces latents in the VAE-encoded space.
+        # The decoding stage's ``scale_and_shift`` will convert them to
+        # raw VAE space (``latents / scaling_factor + shift_factor``)
+        # before calling ``vae.decode``.  We only need to add the temporal
+        # dimension expected by the 3D VAE: [B, C, H, W] -> [B, C, 1, H, W].
+        batch.latents = latents.to(torch.bfloat16).unsqueeze(2)
 
         logger.info(
             "HunyuanImage3AR produced latents %s for %dx%d image",
