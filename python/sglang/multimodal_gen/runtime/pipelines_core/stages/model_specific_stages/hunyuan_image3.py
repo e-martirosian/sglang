@@ -1,5 +1,6 @@
 import contextlib
 import gc
+from collections.abc import Mapping
 from functools import partial
 
 import torch
@@ -199,6 +200,7 @@ class HunyuanImage3AR(PipelineStage):
         shell.model.layers = torch.nn.ModuleList()
         gc.collect()
 
+        self._pin_shell_hook_devices(shell, device)
         shell.eval()
         self._shell = shell
         logger.info("HunyuanImage-3 shell model ready (backbone delegated to sglang)")
@@ -289,6 +291,29 @@ class HunyuanImage3AR(PipelineStage):
             set_module_tensor_to_device(
                 shell, param_name, device, value=tensor.data
             )
+
+    @staticmethod
+    def _pin_shell_hook_devices(shell: torch.nn.Module, device: torch.device) -> None:
+        """Pin every accelerate hook's execution device to the local accelerator.
+
+        accelerate's dispatch_model picks the main device as the first element
+        of the *set* of device_map values. With our "meta" placements that set
+        is {"meta", <accelerator>}, whose iteration order is arbitrary, so the
+        root hook's execution device (also returned by diffusers'
+        ``_execution_device``) can resolve to "meta". The root hook then
+        silently moves the forward inputs onto the meta device, and the next
+        module's hook raises "Cannot copy out of meta tensor; no data!".
+        """
+        for module in shell.modules():
+            hook = getattr(module, "_hf_hook", None)
+            if hook is None:
+                continue
+            exec_device = getattr(hook, "execution_device", None)
+            if exec_device is None or (
+                not isinstance(exec_device, Mapping)
+                and torch.device(exec_device).type == "meta"
+            ):
+                hook.execution_device = device
 
     # --- backbone routing -----------------------------------------------------
 
