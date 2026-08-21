@@ -100,11 +100,17 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1, mla
         k_shape = k.shape
         q = q.reshape(*q_shape[:-1], head_dim // 2, 2)
         k = k.reshape(*k_shape[:-1], head_dim // 2, 2)
-        # Expand cos/sin to exactly match q/k shape so no broadcasting
-        # ambiguity can occur regardless of cos/sin input dimensionality.
-        # cos/sin: [..., cos_dim] -> [..., cos_dim, 1]
-        cos = cos.unsqueeze(-1).expand_as(q)
-        sin = sin.unsqueeze(-1).expand_as(k)
+        # cos/sin from build_batch_2d_rope have shape [B, seq_len, cos_dim]
+        # (no num_heads dimension).  Reshape to [B, 1, seq_len, cos_dim, 1]
+        # so that broadcasting inserts the num_heads and pair dims correctly.
+        # Step 1: flatten to [B*seq_len, cos_dim] then split back.
+        cos = cos.reshape(-1, cos.shape[-1])  # [B*seq, cos_dim]
+        sin = sin.reshape(-1, sin.shape[-1])
+        batch_seq = q_shape[0]  # batch size from q
+        seq_len = q_shape[-2]   # seq_len from q (before pair dim)
+        # Step 2: reshape to [B, 1, seq_len, cos_dim, 1]
+        cos = cos.reshape(batch_seq, seq_len, cos.shape[-1]).unsqueeze(1).unsqueeze(-1)
+        sin = sin.reshape(batch_seq, seq_len, sin.shape[-1]).unsqueeze(1).unsqueeze(-1)
 
         q_embed = (q * cos) + (
             torch.stack((-q[..., 1], q[..., 0]), dim=-1) * sin
