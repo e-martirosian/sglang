@@ -27,8 +27,10 @@ MoE layer of its own.
 """
 
 import math
+import os
 import re
 import types
+import logging
 from typing import Iterable, Optional, Tuple
 
 import torch
@@ -36,6 +38,13 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 from transformers import PretrainedConfig
+
+logger = logging.getLogger(__name__)
+
+
+def _layer_debug_log(msg, *args):
+    if os.environ.get("HUNYUAN_DEBUG"):
+        logger.info(msg, *args)
 
 # The fused-MoE stack has no multimodal_gen equivalent yet (mm's own
 # MoE blocks also delegate to srt), so these imports stay on srt.
@@ -529,12 +538,27 @@ class HunYuanAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
+        _do_log = os.environ.get("HUNYUAN_DEBUG") and self.layer_id < 2
+        if _do_log:
+            _layer_debug_log(
+                "[L%d attn] qkv_proj: q=%s std=%.6f | k=%s std=%.6f | v=%s std=%.6f",
+                self.layer_id, tuple(q.shape), q.float().std().item(),
+                tuple(k.shape), k.float().std().item(),
+                tuple(v.shape), v.float().std().item(),
+            )
+
         if attn_meta is not None:
             assert positions is None
             q, k = self.image_rope2d_emb(q, k, hidden_states, custom_pos_emb, attn_meta)
         else:
             q, k = self.rotary_emb(positions, q, k)
         ori_k = k
+
+        if _do_log:
+            _layer_debug_log(
+                "[L%d attn] after_rope: q std=%.6f | k std=%.6f",
+                self.layer_id, q.float().std().item(), k.float().std().item(),
+            )
 
         if self.use_qk_norm:
             q = self.query_layernorm(q.view(-1, self.num_heads, self.head_dim).contiguous())
@@ -549,7 +573,21 @@ class HunYuanAttention(nn.Module):
             attn_output = self.attn(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0))
 
         attn_output = attn_output.view(q.shape[0], -1)
+
+        if _do_log:
+            _layer_debug_log(
+                "[L%d attn] attn_output: %s std=%.6f",
+                self.layer_id, tuple(attn_output.shape), attn_output.float().std().item(),
+            )
+
         output, _ = self.o_proj(attn_output)
+
+        if _do_log:
+            _layer_debug_log(
+                "[L%d attn] o_proj output: %s std=%.6f",
+                self.layer_id, tuple(output.shape), output.float().std().item(),
+            )
+
         return output, (ori_k, v)
 
 
@@ -629,6 +667,15 @@ class HunYuanCrossAttention(nn.Module):
         k = ori_k
 
         q, _ = self.q_proj(hidden_states)
+
+        _do_log = os.environ.get("HUNYUAN_DEBUG") and self.layer_id < 2
+        if _do_log:
+            _layer_debug_log(
+                "[L%d cross_attn] q_proj: %s std=%.6f | k(from_master): std=%.6f | v(from_master): std=%.6f",
+                self.layer_id, tuple(q.shape), q.float().std().item(),
+                k.float().std().item(), v.float().std().item(),
+            )
+
         if attn_meta is not None:
             assert positions is None
             q, _ = self.image_rope2d_emb(
@@ -637,6 +684,12 @@ class HunYuanCrossAttention(nn.Module):
         else:
             k_tmp = torch.empty_like(k)
             q, _ = self.rotary_emb(positions, q, k_tmp)
+
+        if _do_log:
+            _layer_debug_log(
+                "[L%d cross_attn] after_rope: q std=%.6f",
+                self.layer_id, q.float().std().item(),
+            )
 
         if self.use_qk_norm:
             q = self.query_layernorm(q.view(-1, self.num_heads, self.head_dim).contiguous())
@@ -652,6 +705,13 @@ class HunYuanCrossAttention(nn.Module):
 
         attn_output = attn_output.view(q.shape[0], -1)
         output, _ = self.o_proj(attn_output)
+
+        if _do_log:
+            _layer_debug_log(
+                "[L%d cross_attn] output: %s std=%.6f",
+                self.layer_id, tuple(output.shape), output.float().std().item(),
+            )
+
         return output, (ori_k, v)
 
 
@@ -786,9 +846,20 @@ class HunyuanImage3DecoderLayer(nn.Module):
         self, positions, hidden_states, forward_batch, residual,
         kv_states=None, attn_meta=None, attention_mask=None, custom_pos_emb=None,
     ):
+        _do_log = os.environ.get("HUNYUAN_DEBUG") and self.layer_id < 2
         if attention_mask is not None:
+            if _do_log:
+                _layer_debug_log(
+                    "[L%d layer] in: %s std=%.6f",
+                    self.layer_id, tuple(hidden_states.shape), hidden_states.float().std().item(),
+                )
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
+            if _do_log:
+                _layer_debug_log(
+                    "[L%d layer] after_input_ln: std=%.6f",
+                    self.layer_id, hidden_states.float().std().item(),
+                )
             hidden_states, ori_kv_states = self.self_attn(
                 positions=positions, hidden_states=hidden_states,
                 forward_batch=forward_batch, kv_states=kv_states,
@@ -796,10 +867,30 @@ class HunyuanImage3DecoderLayer(nn.Module):
                 custom_pos_emb=custom_pos_emb,
             )
             hidden_states = residual + hidden_states
+            if _do_log:
+                _layer_debug_log(
+                    "[L%d layer] after_attn_res: std=%.6f",
+                    self.layer_id, hidden_states.float().std().item(),
+                )
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)
+            if _do_log:
+                _layer_debug_log(
+                    "[L%d layer] after_post_attn_ln: std=%.6f",
+                    self.layer_id, hidden_states.float().std().item(),
+                )
             hidden_states = self.mlp(hidden_states)
+            if _do_log:
+                _layer_debug_log(
+                    "[L%d layer] after_mlp: std=%.6f",
+                    self.layer_id, hidden_states.float().std().item(),
+                )
             hidden_states = residual + hidden_states
+            if _do_log:
+                _layer_debug_log(
+                    "[L%d layer] out: std=%.6f",
+                    self.layer_id, hidden_states.float().std().item(),
+                )
         else:
             if residual is None:
                 residual = hidden_states
@@ -875,6 +966,9 @@ class HunyuanImage3Model(nn.Module):
                 attention_mask, num_image_tokens, first_step
             )
 
+        _do_log = os.environ.get("HUNYUAN_DEBUG")
+        bs = hidden_states.shape[0] if hidden_states.dim() == 3 else 1
+
         cla_factor = _get_cla_factor(self.config)
         prev_kv_states = None
         for i, layer in enumerate(self.layers):
@@ -886,6 +980,23 @@ class HunyuanImage3Model(nn.Module):
                 prev_kv_states = kv_states
             else:
                 prev_kv_states = None
+
+            if _do_log:
+                # Log per-layer std for both branches
+                if bs >= 2 and hidden_states.dim() == 2:
+                    seq_len = hidden_states.shape[0] // bs
+                    h0 = hidden_states[:seq_len].float()
+                    h1 = hidden_states[seq_len:2*seq_len].float()
+                    branch_diff = (h0 - h1).std().item()
+                    _layer_debug_log(
+                        "[backbone] L%d out: std0=%.6f std1=%.6f branch_diff=%.6f",
+                        i, h0.std().item(), h1.std().item(), branch_diff,
+                    )
+                else:
+                    _layer_debug_log(
+                        "[backbone] L%d out: %s std=%.6f",
+                        i, tuple(hidden_states.shape), hidden_states.float().std().item(),
+                    )
 
         return hidden_states.contiguous()
 

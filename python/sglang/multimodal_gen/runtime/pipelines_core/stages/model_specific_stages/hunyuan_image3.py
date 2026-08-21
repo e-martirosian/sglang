@@ -545,6 +545,11 @@ class HunyuanImage3AR(PipelineStage):
         """Extract the noise prediction from backbone output via final_layer."""
         n_embd = hidden_states.size(-1)
         t_emb = self.ar_model.time_embed_2(timesteps)
+        _is_debug = os.environ.get("HUNYUAN_DEBUG", "0") == "1"
+
+        if _is_debug:
+            logger.info("[DEBUG] final_layer_in: hidden=%s t_emb=%s",
+                        _tensor_stats(hidden_states), _tensor_stats(t_emb))
 
         if first_step:
             # Select image positions using the mask
@@ -555,7 +560,14 @@ class HunyuanImage3AR(PipelineStage):
             # Non-first step: skip the timestep token (position 0)
             image_output = hidden_states[:, 1:, :]
 
+        if _is_debug:
+            logger.info("[DEBUG] final_layer_img_input: %s", _tensor_stats(image_output))
+
         pred = self.ar_model.final_layer(image_output, t_emb, token_h, token_w)
+
+        if _is_debug:
+            logger.info("[DEBUG] final_layer_out: %s", _tensor_stats(pred))
+
         return pred
 
     # ------------------------------------------------------------------

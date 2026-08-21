@@ -19,11 +19,20 @@ Ported from the official HunyuanImage-3 model repository
 """
 
 import math
+import os
+import logging
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
+
+
+def _rope_debug_log(msg, *args):
+    if os.environ.get("HUNYUAN_DEBUG"):
+        logger.info(msg, *args)
 
 
 # =============================================================
@@ -164,11 +173,41 @@ class HunYuanRotary2DEmbedder:
         bs = len(attn_meta.query_lens)
         q_len = total_tokens // bs
 
+        _rope_debug_log(
+            "[RoPE] before: q=%s k=%s cos=%s sin=%s head_dim=%d cos_dim=%d branch=%s",
+            tuple(q.shape), tuple(k.shape), tuple(cos.shape), tuple(sin.shape),
+            self.head_dim, cos.shape[-1],
+            "full" if cos.shape[-1] == self.head_dim else "half->full",
+        )
+        if bs <= 2:
+            _rope_debug_log(
+                "[RoPE]   cos: mean=%.6f std=%.6f min=%.6f max=%.6f",
+                cos.float().mean().item(), cos.float().std().item(),
+                cos.float().min().item(), cos.float().max().item(),
+            )
+            _rope_debug_log(
+                "[RoPE]   sin: mean=%.6f std=%.6f min=%.6f max=%.6f",
+                sin.float().mean().item(), sin.float().std().item(),
+                sin.float().min().item(), sin.float().max().item(),
+            )
+
         # Cast to float32 for RoPE precision (matching vllm-omni)
         q = q.reshape(bs, q_len, self.num_heads, self.head_dim).transpose(1, 2).to(torch.float32)
         k = k.reshape(bs, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2).to(torch.float32)
 
+        _rope_debug_log(
+            "[RoPE]   q_pre: mean=%.6f std=%.6f | k_pre: mean=%.6f std=%.6f",
+            q.float().mean().item(), q.float().std().item(),
+            k.float().mean().item(), k.float().std().item(),
+        )
+
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        _rope_debug_log(
+            "[RoPE]   q_post: mean=%.6f std=%.6f | k_post: mean=%.6f std=%.6f",
+            q.float().mean().item(), q.float().std().item(),
+            k.float().mean().item(), k.float().std().item(),
+        )
 
         q = (
             q.transpose(1, 2)
