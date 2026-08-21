@@ -77,6 +77,10 @@ from .hunyuan_image3_utils import (
     timestep_embedding,
 )
 
+from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+
+logger = init_logger(__name__)
+
 # Weight names belonging to the non-AR parts of the HunyuanImage-3 checkpoint
 # (VAE, ViT). These are skipped during backbone weight loading.
 UNEXPECTED_KEYWORDS = [
