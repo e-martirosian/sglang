@@ -340,8 +340,7 @@ class SamplingParams:
         # own defaults that should not be silently overridden by a global env var.
         env_steps = os.environ.get("SGLANG_TEST_NUM_INFERENCE_STEPS")
         if env_steps is not None and self.num_inference_steps is not None:
-            if type(self) is SamplingParams:
-                self.num_inference_steps = int(env_steps)
+            self.num_inference_steps = int(env_steps)
 
         if self.enable_spectrum and isinstance(self.spectrum_params, dict):
             from sglang.multimodal_gen.configs.sample.spectrum import SpectrumParams
