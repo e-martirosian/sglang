@@ -810,6 +810,10 @@ class HunyuanImage3AR(PipelineStage):
             dtype=torch.bfloat16,
         )
 
+        if _debug:
+            logger.info("[DEBUG] initial latents: %s", _tensor_stats(latents))
+            logger.info("[DEBUG] input_ids: shape=%s", tuple(input_ids.shape))
+
         # Backbone forward agent (bound to num_image_tokens for KV cache)
         backbone_fn = partial(self._backbone_forward, num_image_tokens)
 
