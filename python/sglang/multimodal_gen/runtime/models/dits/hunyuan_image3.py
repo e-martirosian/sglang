@@ -21,9 +21,8 @@ Ported from the official HunyuanImage-3 model repository
 (`modeling_hunyuan_image_3.py`).
 
 Uses multimodal_gen layers for TP parallelism, attention, RoPE and
-embeddings. The fused-MoE stack (FusedMoE/TopK and its parallel context)
-still comes from srt because multimodal_gen does not yet provide a fused
-MoE layer of its own.
+embeddings. The MoE block uses primitive per-expert MLPs (no srt
+dependency) for portability.
 """
 
 import math
@@ -46,15 +45,9 @@ def _layer_debug_log(msg, *args):
     if os.environ.get("HUNYUAN_DEBUG"):
         logger.info(msg, *args)
 
-# The fused-MoE stack has no multimodal_gen equivalent yet (mm's own
-# MoE blocks also delegate to srt), so these imports stay on srt.
-from sglang.srt.layers.moe import should_skip_post_experts_all_reduce
-from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
-from sglang.srt.layers.moe.topk import TopK
-from sglang.srt.runtime_context import get_parallel
+# MoE uses primitive per-expert HunYuanMLP modules (no srt dependency).
 
 from sglang.multimodal_gen.runtime.distributed import (
-    get_tp_rank,
     get_tp_world_size,
     tensor_model_parallel_all_reduce,
 )
@@ -579,6 +572,20 @@ class HunYuanAttention(nn.Module):
                 "[L%d attn] attn_output: %s std=%.6f",
                 self.layer_id, tuple(attn_output.shape), attn_output.float().std().item(),
             )
+            # Branch diff at image positions (attn_output is [total_tokens, heads*head_dim])
+            if attn_meta is not None and len(attn_meta.query_lens) >= 2:
+                _n_img = attn_meta.num_image_tokens
+                _total = attn_output.shape[0]
+                _bs = len(attn_meta.query_lens)
+                _slen = _total // _bs
+                if _n_img > 0 and _n_img < _slen:
+                    _ao = attn_output.float()
+                    _a0 = _ao[:_slen][_slen - _n_img:]
+                    _a1 = _ao[_slen:2*_slen][_slen - _n_img:]
+                    _layer_debug_log(
+                        "[L%d attn] attn_img_branch_diff=%.6f",
+                        self.layer_id, (_a0 - _a1).std().item(),
+                    )
 
         output, _ = self.o_proj(attn_output)
 
@@ -716,15 +723,21 @@ class HunYuanCrossAttention(nn.Module):
 
 
 class HunYuanSparseMoeBlock(nn.Module):
+    """Sparse MoE block with primitive per-expert MLPs (no srt dependency).
+
+    Uses softmax gating + top-k selection + individual HunYuanMLP experts.
+    Each expert is a standard HunYuanMLP with TP-sharded gate_up_proj and
+    down_proj. A single all-reduce is performed after combining all expert
+    outputs (and the shared MLP contribution).
+    """
+
     def __init__(
         self, config: PretrainedConfig, layer_id: int,
         quant_config: Optional[QuantizationConfig] = None, prefix: str = "",
     ):
         super().__init__()
         assert layer_id >= 0
-        # Diffusion shards experts over TP only; there is no EP/DP axis.
         self.tp_size = get_tp_world_size()
-        tp_rank = get_tp_rank()
         self.n_routed_experts = config.num_experts
 
         top_k = _get_layer_value(config, "moe_topk", layer_id)
@@ -736,11 +749,24 @@ class HunYuanSparseMoeBlock(nn.Module):
             config.hidden_size, config.num_experts, bias=False,
             quant_config=None, prefix=f"{prefix}.gate",
         )
-        self.topk = TopK(
-            top_k=top_k,
-            renormalize=getattr(config, "norm_topk_prob", top_k > 1),
-            scoring_func="softmax",
-        )
+
+        # Primitive per-expert MLPs (each is a TP-sharded HunYuanMLP).
+        self.experts = nn.ModuleList()
+        for expert_id in range(self.n_routed_experts):
+            self.experts.append(
+                HunYuanMLP(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=intermediate_size,
+                    hidden_act=config.hidden_act,
+                    quant_config=quant_config,
+                    bias=getattr(config, "mlp_bias", False),
+                    prefix=f"{prefix}.experts.{expert_id}",
+                    reduce_results=False,  # single all-reduce at MoE block level
+                )
+            )
+
+        self.top_k = top_k
+        self.renormalize = getattr(config, "norm_topk_prob", top_k > 1)
 
         if getattr(config, "use_mixed_mlp_moe", 0) > 0:
             num_shared_expert = _get_layer_value(config, "num_shared_expert", layer_id)
@@ -757,37 +783,39 @@ class HunYuanSparseMoeBlock(nn.Module):
         else:
             self.shared_mlp = None
 
-        # srt's FusedMoE/dispatcher read srt's MoE parallel context at
-        # construction, which is never initialized for diffusion (no srt
-        # scheduler). Publish the diffusion topology via override: experts
-        # are TP-sharded (moe_tp == TP) and EP stays degenerate (size 1).
-        with get_parallel().override(
-            moe_ep_size=1,
-            moe_ep_rank=0,
-            moe_tp_size=self.tp_size,
-            moe_tp_rank=tp_rank,
-        ):
-            self.experts = FusedMoE(
-                num_experts=self.n_routed_experts, top_k=top_k,
-                hidden_size=config.hidden_size, intermediate_size=intermediate_size,
-                reduce_results=False, layer_id=layer_id,
-                quant_config=quant_config, prefix=f"{prefix}.experts",
-            )
-
     def forward(self, hidden_states):
         orig_shape = hidden_states.shape
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
 
+        # Router logits: [num_tokens, num_experts]
         router_logits, _ = self.gate(hidden_states)
-        topk_output = self.topk(hidden_states, router_logits)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, topk_output=topk_output
+
+        # Top-k expert selection with softmax gating
+        routing_weights = F.softmax(router_logits, dim=-1)
+        topk_weights, topk_indices = torch.topk(
+            routing_weights, self.top_k, dim=-1
         )
+        # Renormalize top-k weights
+        if self.renormalize:
+            topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-8)
+
+        # Compute weighted sum of expert outputs
+        final_hidden_states = torch.zeros_like(hidden_states)
+        for i, expert in enumerate(self.experts):
+            expert_mask = (topk_indices == i).any(dim=-1)  # [num_tokens]
+            if not expert_mask.any():
+                continue
+            token_weights = topk_weights[expert_mask, (topk_indices[expert_mask] == i).int().argmax(dim=-1)]
+            expert_output = expert(hidden_states[expert_mask])
+            final_hidden_states[expert_mask] += token_weights.unsqueeze(-1) * expert_output
+
+        # Shared MLP contribution (always applied to all tokens)
         if self.shared_mlp is not None:
             final_hidden_states = final_hidden_states + self.shared_mlp(hidden_states)
 
-        if self.tp_size > 1 and not should_skip_post_experts_all_reduce(is_tp_path=True):
+        # Single all-reduce after combining all expert + shared outputs
+        if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(orig_shape)
@@ -967,7 +995,14 @@ class HunyuanImage3Model(nn.Module):
             )
 
         _do_log = os.environ.get("HUNYUAN_DEBUG")
-        bs = hidden_states.shape[0] if hidden_states.dim() == 3 else 1
+        # Get actual batch size from attention mask (hidden_states is 2D: [B*S, H])
+        if attention_mask is not None:
+            _real_bs = attention_mask.shape[0]
+        elif attn_meta is not None:
+            _real_bs = len(attn_meta.query_lens)
+        else:
+            _real_bs = hidden_states.shape[0] if hidden_states.dim() == 3 else 1
+        _num_img = num_image_tokens or (attn_meta.num_image_tokens if attn_meta else 0)
 
         cla_factor = _get_cla_factor(self.config)
         prev_kv_states = None
@@ -981,22 +1016,33 @@ class HunyuanImage3Model(nn.Module):
             else:
                 prev_kv_states = None
 
-            if _do_log:
-                # Log per-layer std for both branches
-                if bs >= 2 and hidden_states.dim() == 2:
-                    seq_len = hidden_states.shape[0] // bs
-                    h0 = hidden_states[:seq_len].float()
-                    h1 = hidden_states[seq_len:2*seq_len].float()
-                    branch_diff = (h0 - h1).std().item()
+            if _do_log and _real_bs >= 2 and hidden_states.dim() == 2:
+                seq_len = hidden_states.shape[0] // _real_bs
+                h0 = hidden_states[:seq_len].float()
+                h1 = hidden_states[seq_len:2*seq_len].float()
+                all_diff = (h0 - h1).std().item()
+                # Image-position branch diff (image tokens at end of sequence)
+                if _num_img > 0 and _num_img < seq_len:
+                    img0 = h0[seq_len - _num_img:]
+                    img1 = h1[seq_len - _num_img:]
+                    img_diff = (img0 - img1).std().item()
+                    txt_diff = (h0[:seq_len - _num_img] - h1[:seq_len - _num_img]).std().item()
                     _layer_debug_log(
-                        "[backbone] L%d out: std0=%.6f std1=%.6f branch_diff=%.6f",
-                        i, h0.std().item(), h1.std().item(), branch_diff,
+                        "[backbone] L%d out: std0=%.6f std1=%.6f | "
+                        "all_diff=%.6f txt_diff=%.6f img_diff=%.6f",
+                        i, h0.std().item(), h1.std().item(),
+                        all_diff, txt_diff, img_diff,
                     )
                 else:
                     _layer_debug_log(
-                        "[backbone] L%d out: %s std=%.6f",
-                        i, tuple(hidden_states.shape), hidden_states.float().std().item(),
+                        "[backbone] L%d out: std0=%.6f std1=%.6f all_diff=%.6f",
+                        i, h0.std().item(), h1.std().item(), all_diff,
                     )
+            elif _do_log:
+                _layer_debug_log(
+                    "[backbone] L%d out: %s std=%.6f",
+                    i, tuple(hidden_states.shape), hidden_states.float().std().item(),
+                )
 
         return hidden_states.contiguous()
 
@@ -1143,18 +1189,23 @@ class HunyuanImage3ForCausalMM(CachableDiT):
 
         cla_factor = _get_cla_factor(self.hf_config)
 
-        expert_params_mapping = []
+        expert_gate_up_mapping = []
+        expert_down_mapping = []
         if _is_moe(self.hf_config):
-            expert_params_mapping = FusedMoE.make_expert_params_mapping(
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=self.hf_config.num_experts,
-            )
-        expert_weights_remapping = {
-            "gate_proj": ("gate_and_up_proj", 1, 2),
-            "up_proj": ("gate_and_up_proj", 0, 2),
-        }
+            num_experts = self.hf_config.num_experts
+            # Stacked mapping for per-expert gate_proj / up_proj → gate_up_proj
+            expert_gate_up_mapping = [
+                (f"experts.{eid}.gate_up_proj", f"experts.{eid}.gate_proj", 0)
+                for eid in range(num_experts)
+            ] + [
+                (f"experts.{eid}.gate_up_proj", f"experts.{eid}.up_proj", 1)
+                for eid in range(num_experts)
+            ]
+            # Direct mapping for per-expert down_proj
+            expert_down_mapping = [
+                (f"experts.{eid}.down_proj", f"experts.{eid}.down_proj")
+                for eid in range(num_experts)
+            ]
 
         params_dict = dict(self.named_parameters())
         loaded_params: set = set()
@@ -1238,39 +1289,38 @@ class HunyuanImage3ForCausalMM(CachableDiT):
             if is_found:
                 continue
 
-            is_expert_weight = False
-            found_num = 0
-            for mapping in expert_params_mapping:
-                param_name, weight_name, expert_id, shard_id = mapping
-                offset = 0
-                den = 1
-                for mapped_weight_substr, origin_weight_info in expert_weights_remapping.items():
-                    if mapped_weight_substr in weight_name:
-                        origin_weight_name, offset, den = origin_weight_info
-                        weight_name = weight_name.replace(mapped_weight_substr, origin_weight_name)
-                        break
+            # Expert gate_proj / up_proj → gate_up_proj (stacked)
+            is_found = False
+            for param_name, weight_name, shard_id in expert_gate_up_mapping:
                 if weight_name not in name:
                     continue
-                is_expert_weight = True
                 name_mapped = name.replace(weight_name, param_name)
-                found_num += 1
                 if name_mapped not in params_dict:
                     continue
                 param = params_dict[name_mapped]
                 weight_loader = param.weight_loader
-                assert loaded_weight.shape[0] % den == 0
-                units = loaded_weight.shape[0] // den
-                weight_loader(
-                    param, loaded_weight[offset * units : offset * units + units],
-                    name_mapped, shard_id=shard_id, expert_id=expert_id,
-                )
+                weight_loader(param, loaded_weight, shard_id)
                 loaded_params.add(name_mapped)
                 is_found = True
-                if found_num == den:
-                    break
+                break
             if is_found:
                 continue
-            if is_expert_weight:
+
+            # Expert down_proj (direct)
+            is_found = False
+            for param_name, weight_name in expert_down_mapping:
+                if weight_name not in name:
+                    continue
+                name_mapped = name.replace(weight_name, param_name)
+                if name_mapped not in params_dict:
+                    continue
+                param = params_dict[name_mapped]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight)
+                loaded_params.add(name_mapped)
+                is_found = True
+                break
+            if is_found:
                 continue
 
             if name.endswith(".bias") and name not in params_dict:
