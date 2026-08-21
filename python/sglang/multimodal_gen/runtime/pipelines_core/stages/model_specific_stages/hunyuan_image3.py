@@ -750,6 +750,22 @@ class HunyuanImage3AR(PipelineStage):
         scheduler.set_timesteps(num_inference_steps)
         timesteps = scheduler.timesteps
 
+        if _debug:
+            logger.info(
+                "[DEBUG] scheduler: shift=%s num_steps=%d first_5_t=%s last_5_t=%s",
+                getattr(scheduler, '_shift', '?'),
+                num_inference_steps,
+                timesteps[:5].tolist(),
+                timesteps[-5:].tolist(),
+            )
+            if hasattr(scheduler, 'sigmas'):
+                sig = scheduler.sigmas
+                logger.info(
+                    "[DEBUG] scheduler sigmas: first_5=%s last_5=%s",
+                    [f"{s:.6f}" for s in sig[:5].tolist()],
+                    [f"{s:.6f}" for s in sig[-5:].tolist()],
+                )
+
         # 7. Prepare noise latents
         hf_config = self.ar_model.hf_config
         if hasattr(hf_config, "vae") and isinstance(hf_config.vae, dict):
@@ -838,7 +854,7 @@ class HunyuanImage3AR(PipelineStage):
                     hidden_states = self._build_non_first_step_input(
                         t_expand, latent_model_input, actual_batch_size,
                     )
-                    if _debug:
+                    if _debug and (step_idx == 0 or step_idx % 10 == 0):
                         logger.info("[DEBUG] step%d non_first_input: %s", step_idx, _tensor_stats(hidden_states))
 
                 # Select the correct RoPE and attention mask for this step
@@ -849,7 +865,7 @@ class HunyuanImage3AR(PipelineStage):
                     step_cos, step_sin = non_first_cos, non_first_sin
                     step_attn_mask = non_first_attention_mask
 
-                if _debug:
+                if _debug and (step_idx == 0 or step_idx % 10 == 0):
                     logger.info("[DEBUG] step%d backbone_in: hidden=%s cos=%s", step_idx, _tensor_stats(hidden_states), _tensor_stats(step_cos))
 
                 # Run backbone
@@ -857,10 +873,10 @@ class HunyuanImage3AR(PipelineStage):
                     hidden_states, step_attn_mask, (step_cos, step_sin), first_step,
                 )
 
-                if _debug:
+                if _debug and (step_idx == 0 or step_idx % 10 == 0):
                     logger.info("[DEBUG] step%d backbone_out: %s", step_idx, _tensor_stats(backbone_out))
                     # Check backbone output diff between CFG branches at image vs text positions
-                    if actual_batch_size >= 2:
+                    if actual_batch_size >= 2 and (step_idx == 0 or step_idx % 10 == 0):
                         bb0 = backbone_out[0].float().detach()
                         bb1 = backbone_out[1].float().detach()
                         img_mask_1d = image_mask[0].bool().cpu()
@@ -883,7 +899,7 @@ class HunyuanImage3AR(PipelineStage):
                     num_special_tokens=seq_len - num_image_tokens,
                 )
 
-                if _debug:
+                if _debug and (step_idx == 0 or step_idx % 10 == 0):
                     logger.info("[DEBUG] step%d pred_before_cfg: %s", step_idx, _tensor_stats(pred))
 
             pred = pred.float()
@@ -891,19 +907,19 @@ class HunyuanImage3AR(PipelineStage):
             # Classifier-free guidance
             if do_cfg:
                 pred_cond, pred_uncond = pred.chunk(2)
-                if _debug:
+                if _debug and (step_idx == 0 or step_idx % 10 == 0):
                     logger.info("[DEBUG] step%d pred_cond: %s", step_idx, _tensor_stats(pred_cond))
                     logger.info("[DEBUG] step%d pred_uncond: %s", step_idx, _tensor_stats(pred_uncond))
                     logger.info("[DEBUG] step%d cond-uncond diff: %s", step_idx, _tensor_stats(pred_cond - pred_uncond))
                 pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
-                if _debug:
+                if _debug and (step_idx == 0 or step_idx % 10 == 0):
                     logger.info("[DEBUG] step%d pred_after_cfg: %s", step_idx, _tensor_stats(pred))
 
             # Scheduler step (latents is always batch_size=1)
             latent_dtype = latents.dtype
             latents = scheduler.step(pred, t, latents, return_dict=False)[0].to(dtype=latent_dtype)
 
-            if _debug:
+            if _debug and (step_idx == 0 or step_idx % 10 == 0):
                 logger.info("[DEBUG] step%d latents: %s", step_idx, _tensor_stats(latents))
 
             # After first step, text tokens are no longer needed

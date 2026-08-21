@@ -1047,8 +1047,16 @@ class HunyuanImage3ForCausalMM(CachableDiT):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set = set()
+        _ckpt_dtype_logged = False
 
         for name, loaded_weight in weights:
+            if not _ckpt_dtype_logged:
+                logger.info(
+                    "  checkpoint weight dtype: %s (param dtype: %s)",
+                    loaded_weight.dtype,
+                    next(iter(params_dict.values())).dtype if params_dict else "?",
+                )
+                _ckpt_dtype_logged = True
             if any(keyword in name for keyword in UNEXPECTED_KEYWORDS):
                 continue
             if "rotary_emb.inv_freq" in name:
@@ -1191,6 +1199,23 @@ class HunyuanImage3ForCausalMM(CachableDiT):
                 "Weight loading: %d/%d params loaded (complete)",
                 len(loaded_params), len(all_param_names),
             )
+
+        # Log weight dtypes for a few key parameters
+        key_names = [
+            "model.embed_tokens.weight",
+            "model.layers.0.self_attn.q_proj.weight",
+            "model.layers.0.mlp.gate.weight",
+            "patch_embed.proj.weight",
+            "final_layer.linear.weight",
+        ]
+        for kn in key_names:
+            if kn in params_dict:
+                p = params_dict[kn]
+                logger.info(
+                    "  weight dtype check: %s -> dtype=%s shape=%s",
+                    kn, p.dtype, tuple(p.shape),
+                )
+
         return loaded_params
 
 
