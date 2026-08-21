@@ -725,6 +725,25 @@ class HunyuanImage3AR(PipelineStage):
                 for i, sec in enumerate(sections):
                     sec_types = [s.get('type', '?') for s in sec if isinstance(s, dict)]
                     logger.info("[DEBUG]     section[%d]: %d items, types=%s", i, len(sec), sec_types)
+                    # Log text content of each item in the section
+                    for j, item in enumerate(sec):
+                        if isinstance(item, dict):
+                            item_type = item.get('type', '?')
+                            if item_type == 'text':
+                                text = item.get('text', '')
+                                text_len = len(text) if isinstance(text, str) else 0
+                                uncond = item.get('uncond_enabled', None)
+                                logger.info(
+                                    "[DEBUG]       item[%d] type=text len=%d uncond=%s text=%r",
+                                    j, text_len, uncond, text[:200] if isinstance(text, str) else text,
+                                )
+                            elif item_type == 'gen_image':
+                                logger.info(
+                                    "[DEBUG]       item[%d] type=gen_image token_length=%s base_size=%s",
+                                    j, item.get('token_length', '?'), item.get('base_size', '?'),
+                                )
+                            else:
+                                logger.info("[DEBUG]       item[%d] type=%s", j, item_type)
 
         # Extract tensors from tokenizer output
         if hasattr(tokenizer_output, "tokens"):
