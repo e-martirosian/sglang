@@ -503,16 +503,28 @@ class HunyuanImage3AR(PipelineStage):
         The ``timestep_emb`` module produces one embedding per batch element,
         but ``timestep_index`` may mark multiple sequence positions that should
         all receive the *same* embedding vector.
+
+        ``timestep_index`` may be either:
+          - A boolean mask of shape ``(bsz, seqlen)`` — True marks scatter positions.
+          - Position indices of shape ``(bsz, K)`` — each value is a column index.
         """
         bsz, seqlen, n_embd = hidden_states.shape
         # One embedding per batch element → [bsz, 1, n_embd]
         timestep_emb = self.ar_model.timestep_emb(timesteps).reshape(bsz, -1, n_embd)
-        index = (
-            torch.arange(seqlen, device=hidden_states.device)
-            .unsqueeze(0)
-            .expand(bsz, -1)
-        )
-        ts_scatter_index = index.masked_select(timestep_index.bool()).reshape(bsz, -1)
+
+        # Determine scatter indices based on timestep_index format
+        if timestep_index.dtype == torch.bool:
+            # Boolean mask: (bsz, seqlen) with True at scatter positions
+            index = (
+                torch.arange(seqlen, device=hidden_states.device)
+                .unsqueeze(0)
+                .expand(bsz, -1)
+            )
+            ts_scatter_index = index.masked_select(timestep_index).reshape(bsz, -1)
+        else:
+            # Position indices: (bsz, K) containing column indices directly
+            ts_scatter_index = timestep_index.long()
+
         num_positions = ts_scatter_index.shape[1]
         # Expand the single embedding to fill all marked positions
         timestep_emb = timestep_emb.expand(-1, num_positions, -1)
@@ -722,11 +734,16 @@ class HunyuanImage3AR(PipelineStage):
 
         if _debug:
             if timestep_index is not None:
-                n_ts_pos = timestep_index.sum(dim=-1) if timestep_index.dtype == torch.bool else (timestep_index > 0).sum(dim=-1)
+                if timestep_index.dtype == torch.bool:
+                    n_ts_pos = timestep_index.sum(dim=-1)
+                else:
+                    n_ts_pos = torch.tensor([timestep_index.shape[1]] * timestep_index.shape[0])
                 logger.info(
-                    "[DEBUG] timestep_index: shape=%s marked_per_row=%s",
+                    "[DEBUG] timestep_index: shape=%s dtype=%s marked_per_row=%s values=%s",
                     tuple(timestep_index.shape),
+                    timestep_index.dtype,
                     n_ts_pos.tolist(),
+                    timestep_index[:, :5].tolist() if timestep_index.shape[1] <= 5 else timestep_index[0, :3].tolist(),
                 )
             else:
                 logger.warning("[DEBUG] timestep_index is None!")
