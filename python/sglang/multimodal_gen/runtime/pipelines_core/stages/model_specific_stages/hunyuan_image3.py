@@ -246,6 +246,30 @@ class HunyuanImage3AR(PipelineStage):
         self._scheduler = scheduler
         self._model_path = model_path
         self._custom_tokenizer = None
+        self._sequence_template: str | None = None
+        self._drop_think: bool = False
+
+    def _get_sequence_template(self) -> str:
+        """Read sequence_template from model's generation_config, default 'pretrain'.
+
+        Matches vllm-omni behaviour: ``GenerationConfig.from_pretrained(model_path)``
+        then ``getattr(generation_config, 'sequence_template', 'pretrain')``.
+        """
+        if self._sequence_template is not None:
+            return self._sequence_template
+        try:
+            from transformers.generation.configuration_utils import GenerationConfig
+            gen_cfg = GenerationConfig.from_pretrained(self._model_path)
+            self._sequence_template = getattr(gen_cfg, "sequence_template", "pretrain")
+            self._drop_think = getattr(gen_cfg, "drop_think", False)
+        except Exception:
+            self._sequence_template = "pretrain"
+            self._drop_think = False
+        logger.info(
+            "Using sequence_template='%s', drop_think=%s (from model generation_config)",
+            self._sequence_template, self._drop_think,
+        )
+        return self._sequence_template
 
     def component_uses(
         self, server_args: ServerArgs, stage_name: str | None = None
@@ -611,7 +635,8 @@ class HunyuanImage3AR(PipelineStage):
             batch_prompt=[batch.prompt],
             mode="gen_image",
             bot_task=bot_task,
-            sequence_template="instruct",
+            sequence_template=self._get_sequence_template(),
+            drop_think=self._drop_think,
             cfg_factor=cfg_factor,
             image_base_size=getattr(
                 processor, "vae_reso_group", None
