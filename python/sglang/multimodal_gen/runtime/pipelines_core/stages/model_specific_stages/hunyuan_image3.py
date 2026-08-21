@@ -926,13 +926,6 @@ class HunyuanImage3AR(PipelineStage):
         )
 
 
-        logger.info(
-            "HunyuanImage3AR effective params: num_inference_steps=%d (from %s), "
-            "guidance_scale=%.2f (from %s), do_cfg=%s",
-            num_inference_steps, _steps_source,
-            guidance_scale, _guidance_source, do_cfg,
-        )
-
         scheduler = self._scheduler
         scheduler.set_timesteps(num_inference_steps)
         timesteps = scheduler.timesteps
