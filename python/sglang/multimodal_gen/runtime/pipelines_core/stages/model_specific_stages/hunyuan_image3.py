@@ -585,6 +585,7 @@ class HunyuanImage3AR(PipelineStage):
             device = model_device
 
         # 3. Build input sequence using the custom tokenizer
+        _debug = os.environ.get("HUNYUAN_DEBUG", "0") == "1"
         batch_size = 1
         guidance_scale = float(
             getattr(batch, "guidance_scale", None) or _DEFAULT_GUIDANCE_SCALE
@@ -643,6 +644,31 @@ class HunyuanImage3AR(PipelineStage):
 
         actual_batch_size = input_ids.shape[0]
         seq_len = input_ids.shape[1]
+
+        if _debug:
+            # Verify the two CFG branches have different tokens
+            if actual_batch_size >= 2:
+                branch0 = input_ids[0].cpu()
+                branch1 = input_ids[1].cpu()
+                diff_positions = (branch0 != branch1).nonzero(as_tuple=True)[0]
+                logger.info(
+                    "[DEBUG] input_ids: shape=%s, branch0 vs branch1: %d/%d tokens differ",
+                    tuple(input_ids.shape), len(diff_positions), seq_len,
+                )
+                if len(diff_positions) > 0:
+                    logger.info(
+                        "[DEBUG]   first 10 diff positions: %s",
+                        diff_positions[:10].tolist(),
+                    )
+                    for pos in diff_positions[:3]:
+                        logger.info(
+                            "[DEBUG]   pos %d: branch0=%d branch1=%d",
+                            pos.item(), branch0[pos].item(), branch1[pos].item(),
+                        )
+                else:
+                    logger.warning("[DEBUG]   WARNING: both branches have IDENTICAL tokens!")
+            else:
+                logger.warning("[DEBUG] input_ids batch_size=%d, expected 2 for CFG", actual_batch_size)
 
         # Image mask
         if hasattr(tokenizer_output, "gen_image_mask"):
@@ -736,7 +762,6 @@ class HunyuanImage3AR(PipelineStage):
         backbone_fn = partial(self._backbone_forward, num_image_tokens)
 
         # 8. Diffusion sampling loop
-        _debug = os.environ.get("HUNYUAN_DEBUG", "0") == "1"
         for step_idx, t in enumerate(timesteps):
             first_step = step_idx == 0
 
@@ -811,6 +836,10 @@ class HunyuanImage3AR(PipelineStage):
             # Classifier-free guidance
             if do_cfg:
                 pred_cond, pred_uncond = pred.chunk(2)
+                if _debug:
+                    logger.info("[DEBUG] step%d pred_cond: %s", step_idx, _tensor_stats(pred_cond))
+                    logger.info("[DEBUG] step%d pred_uncond: %s", step_idx, _tensor_stats(pred_uncond))
+                    logger.info("[DEBUG] step%d cond-uncond diff: %s", step_idx, _tensor_stats(pred_cond - pred_uncond))
                 pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
                 if _debug:
                     logger.info("[DEBUG] step%d pred_after_cfg: %s", step_idx, _tensor_stats(pred))
