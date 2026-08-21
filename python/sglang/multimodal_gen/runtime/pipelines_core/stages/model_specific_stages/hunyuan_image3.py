@@ -140,6 +140,7 @@ def _get_system_prompt(sys_type: str) -> str | None:
         return _SYSTEM_PROMPTS["en_unified"]
 
 
+
 def _build_causal_attention_mask(
     batch_size: int,
     seq_len: int,
@@ -587,9 +588,13 @@ class HunyuanImage3AR(PipelineStage):
             bot_task = "image"
 
         # Build tokenizer inputs
-        prompts = [batch.prompt] * cfg_factor
+        # The base tokenizer supports cfg_factor natively (via batch_gen_infer).
+        # When cfg_factor=2, it internally creates:
+        #   - conditioned branch: real prompt (uncond_p=0.0)
+        #   - unconditioned branch: prompt text replaced with <cfg> tokens (uncond_p=1.0)
+        # This matches the vllm-omni TokenizerWrapper behaviour.
         tokenizer_kwargs: dict[str, Any] = dict(
-            batch_prompt=prompts,
+            batch_prompt=[batch.prompt],
             mode="gen_image",
             bot_task=bot_task,
             sequence_template="instruct",
@@ -600,15 +605,13 @@ class HunyuanImage3AR(PipelineStage):
         )
 
         # Add system prompt based on sys_type
-        # This instructs the model on its multimodal capabilities and image generation protocol.
         system_prompt = _get_system_prompt(sys_type)
         if system_prompt is not None:
-            system_prompts = [system_prompt] * cfg_factor
-            tokenizer_kwargs["batch_system_prompt"] = system_prompts
+            tokenizer_kwargs["batch_system_prompt"] = [system_prompt]
 
         # Provide gen image info if the tokenizer supports it
         if image_info is not None:
-            tokenizer_kwargs["batch_gen_image_info"] = [image_info] * cfg_factor
+            tokenizer_kwargs["batch_gen_image_info"] = [image_info]
 
         tokenizer_output_dict = tokenizer.apply_chat_template(**tokenizer_kwargs)
         # The output format: dict with 'output' and 'sections'
