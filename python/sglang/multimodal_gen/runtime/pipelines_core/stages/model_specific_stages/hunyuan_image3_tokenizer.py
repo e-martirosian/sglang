@@ -634,11 +634,12 @@ class HunyuanImage3TokenizerWrapper:
         while cur_idx < len(message_list):
             for role, pfx, sfx, apfx, asfx in [
                 ("system", "", system_suffix, "", ""),
-                ("user", user_prefix, user_suffix, answer_prefix, answer_suffix),
+                ("user", user_prefix, user_suffix, "", ""),
                 ("assistant", bot_prefix, bot_suffix, answer_prefix, answer_suffix),
             ]:
                 sub, cur_idx = self._process_successive(
                     message_list, cur_idx, role, pfx, sfx, apfx, asfx,
+                    uncond_kwargs=uncond_kwargs,
                 )
                 sections.extend(sub)
                 if sub:
@@ -672,7 +673,10 @@ class HunyuanImage3TokenizerWrapper:
     # -- process successive messages of the same role -----------------------
 
     def _process_successive(self, message_list, cur_idx, role,
-                            prefix, suffix, answer_prefix="", answer_suffix=""):
+                            prefix, suffix, answer_prefix="", answer_suffix="",
+                            uncond_kwargs=None):
+        if uncond_kwargs is None:
+            uncond_kwargs = {}
         sub_sections: list[dict] = []
         while cur_idx < len(message_list) and message_list[cur_idx]["role"] == role:
             msg = message_list[cur_idx]
@@ -684,12 +688,13 @@ class HunyuanImage3TokenizerWrapper:
                     if ("<think>" in text and "</think>" in text) or (
                         "<recaption>" in text and "</recaption>" in text
                     ):
-                        sub_sections.extend(self._get_cot_sections(text, {}))
+                        sub_sections.extend(self._get_cot_sections(text, uncond_kwargs))
                     else:
-                        sub_sections.append(dict(type="text", text=text))
+                        sub_sections.append(dict(type="text", text=text, **uncond_kwargs))
                 else:
+                    # User text: no answer tags, but apply uncond_kwargs for CFG
                     sub_sections.append(
-                        dict(type="text", text=f"{answer_prefix}{text}{answer_suffix}")
+                        dict(type="text", text=f"{answer_prefix}{text}{answer_suffix}", **uncond_kwargs)
                     )
             elif msg["type"] == "gen_image":
                 info = msg["content"]
