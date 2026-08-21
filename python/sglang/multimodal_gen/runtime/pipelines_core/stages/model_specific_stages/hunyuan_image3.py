@@ -974,7 +974,14 @@ class HunyuanImage3AR(PipelineStage):
                     if actual_batch_size >= 2 and (step_idx == 0 or step_idx % 10 == 0):
                         bb0 = backbone_out[0].float().detach()
                         bb1 = backbone_out[1].float().detach()
-                        img_mask_1d = image_mask[0].bool().cpu()
+                        seq_len_step = bb0.shape[0]
+                        if first_step:
+                            img_mask_1d = image_mask[0].bool().cpu()
+                        else:
+                            # Non-first step: seq is [timestep_token, ...image_tokens...]
+                            # All positions except index 0 are image tokens
+                            img_mask_1d = torch.zeros(seq_len_step, dtype=torch.bool)
+                            img_mask_1d[1:] = True
                         n_img = img_mask_1d.sum().item()
                         if n_img > 0:
                             img_diff = (bb0[img_mask_1d] - bb1[img_mask_1d])
