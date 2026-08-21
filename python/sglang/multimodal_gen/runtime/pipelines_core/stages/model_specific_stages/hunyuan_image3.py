@@ -256,6 +256,8 @@ class HunyuanImage3AR(PipelineStage):
         self._custom_tokenizer = None
         self._sequence_template: str | None = None
         self._drop_think: bool = False
+        self._gen_config_steps: int | None = None
+        self._gen_config_guidance_scale: float | None = None
 
     def _get_sequence_template(self) -> str:
         """Read sequence_template from model's generation_config, default 'pretrain'.
@@ -278,6 +280,43 @@ class HunyuanImage3AR(PipelineStage):
             self._sequence_template, self._drop_think,
         )
         return self._sequence_template
+
+    def _read_gen_config(self) -> dict:
+        """Lazily read and cache the model's generation_config.json."""
+        if not hasattr(self, "_gen_config_cache"):
+            try:
+                from transformers.generation.configuration_utils import GenerationConfig
+                gen_cfg = GenerationConfig.from_pretrained(self._model_path)
+                self._gen_config_cache = gen_cfg
+            except Exception:
+                self._gen_config_cache = None
+        return self._gen_config_cache
+
+    def _read_num_inference_steps(self) -> int:
+        """Read diff_infer_steps from generation_config.json, fallback to _DEFAULT_NUM_INFERENCE_STEPS."""
+        if self._gen_config_steps is not None:
+            return self._gen_config_steps
+        gen_cfg = self._read_gen_config()
+        if gen_cfg is not None:
+            val = getattr(gen_cfg, "diff_infer_steps", None)
+            if val is not None:
+                self._gen_config_steps = int(val)
+                return self._gen_config_steps
+        self._gen_config_steps = _DEFAULT_NUM_INFERENCE_STEPS
+        return self._gen_config_steps
+
+    def _read_guidance_scale(self) -> float:
+        """Read diff_guidance_scale from generation_config.json, fallback to _DEFAULT_GUIDANCE_SCALE."""
+        if self._gen_config_guidance_scale is not None:
+            return self._gen_config_guidance_scale
+        gen_cfg = self._read_gen_config()
+        if gen_cfg is not None:
+            val = getattr(gen_cfg, "diff_guidance_scale", None)
+            if val is not None:
+                self._gen_config_guidance_scale = float(val)
+                return self._gen_config_guidance_scale
+        self._gen_config_guidance_scale = _DEFAULT_GUIDANCE_SCALE
+        return self._gen_config_guidance_scale
 
     def component_uses(
         self, server_args: ServerArgs, stage_name: str | None = None
@@ -624,9 +663,19 @@ class HunyuanImage3AR(PipelineStage):
         # 3. Build input sequence using the custom tokenizer
         _debug = os.environ.get("HUNYUAN_DEBUG", "0") == "1"
         batch_size = 1
-        guidance_scale = float(
-            getattr(batch, "guidance_scale", None) or _DEFAULT_GUIDANCE_SCALE
-        )
+
+        # Resolve guidance_scale with priority:
+        # 1. User-explicit value from sampling params
+        # 2. Model generation_config default (diff_guidance_scale)
+        # 3. Hardcoded fallback (_DEFAULT_GUIDANCE_SCALE)
+        sp = batch.sampling_params
+        user_explicit_fields = getattr(sp, "_explicit_fields", set()) if sp else set()
+        if "guidance_scale" in user_explicit_fields:
+            guidance_scale = float(sp.guidance_scale)
+            _guidance_source = "user"
+        else:
+            guidance_scale = self._read_guidance_scale()
+            _guidance_source = "generation_config"
         do_cfg = guidance_scale > 1.0
         cfg_factor = 2 if do_cfg else 1
 
@@ -845,10 +894,51 @@ class HunyuanImage3AR(PipelineStage):
             non_first_seq_len, device, rope_image_info=non_first_rope_info
         )
 
+        # Fix non-first-step RoPE for the timestep token at position 0.
+        # In build_2d_rope, position 0 (before the first image slice) gets
+        # y=x=0, producing zero RoPE (cos=1, sin=0).
+        # In vLLM-omni, the timestep token stays at its text-prefix position
+        # and receives text-position RoPE.  Override position 0 with the
+        # timestep token's original RoPE from the first-step tensors.
+        if timestep_index is not None:
+            if timestep_index.dtype == torch.bool:
+                _ts_pos = int(timestep_index[0].float().argmax().item())
+            else:
+                _ts_pos = int(timestep_index[0, 0].item())
+            # cos shape: [batch_size, seq_len, n_elem//2]
+            _ts_rope_cos = cos[0, _ts_pos : _ts_pos + 1].clone()
+            _ts_rope_sin = sin[0, _ts_pos : _ts_pos + 1].clone()
+            non_first_cos = non_first_cos.clone()
+            non_first_sin = non_first_sin.clone()
+            non_first_cos[:, 0:1] = _ts_rope_cos
+            non_first_sin[:, 0:1] = _ts_rope_sin
+            logger.info(
+                "Overrode non-first RoPE position 0 with timestep token RoPE "
+                "from first-step position %d (cos mean=%.6f, sin mean=%.6f)",
+                _ts_pos,
+                _ts_rope_cos.float().mean().item(),
+                _ts_rope_sin.float().mean().item(),
+            )
+
         # 6. Set up the diffusion scheduler
-        num_inference_steps = int(
-            getattr(batch, "num_inference_steps", None) or _DEFAULT_NUM_INFERENCE_STEPS
+        # Resolve num_inference_steps with priority:
+        # 1. User-explicit value from sampling params
+        # 2. Model generation_config default (diff_infer_steps)
+        # 3. Hardcoded fallback (_DEFAULT_NUM_INFERENCE_STEPS)
+        if "num_inference_steps" in user_explicit_fields:
+            num_inference_steps = int(sp.num_inference_steps)
+            _steps_source = "user"
+        else:
+            num_inference_steps = self._read_num_inference_steps()
+            _steps_source = "generation_config"
+
+        logger.info(
+            "HunyuanImage3AR effective params: num_inference_steps=%d (from %s), "
+            "guidance_scale=%.2f (from %s), do_cfg=%s",
+            num_inference_steps, _steps_source,
+            guidance_scale, _guidance_source, do_cfg,
         )
+
         scheduler = self._scheduler
         scheduler.set_timesteps(num_inference_steps)
         timesteps = scheduler.timesteps
