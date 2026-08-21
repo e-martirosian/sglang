@@ -673,12 +673,58 @@ class HunyuanImage3AR(PipelineStage):
         if image_info is not None:
             tokenizer_kwargs["batch_gen_image_info"] = [image_info]
 
+        if _debug:
+            logger.info("[DEBUG] === TOKENIZER INPUTS ===")
+            logger.info("[DEBUG]   batch.prompt (raw): %r", batch.prompt)
+            logger.info("[DEBUG]   bot_task: %s, sys_type: %s", bot_task, sys_type)
+            logger.info("[DEBUG]   sequence_template: %s, drop_think: %s", self._get_sequence_template(), self._drop_think)
+            logger.info("[DEBUG]   cfg_factor: %d, do_cfg: %s", cfg_factor, do_cfg)
+            logger.info("[DEBUG]   image_base_size: %s", tokenizer_kwargs.get("image_base_size"))
+            sp = tokenizer_kwargs.get("batch_system_prompt")
+            if sp:
+                logger.info("[DEBUG]   system_prompt: len=%d first100=%r", len(sp[0]), sp[0][:100])
+            else:
+                logger.info("[DEBUG]   system_prompt: None (NOT SET)")
+            img_info = tokenizer_kwargs.get("batch_gen_image_info")
+            if img_info and img_info[0] is not None:
+                info = img_info[0]
+                logger.info(
+                    "[DEBUG]   gen_image_info: image_height=%s image_width=%s token_height=%s token_width=%s image_token_length=%s",
+                    getattr(info, 'image_height', '?'), getattr(info, 'image_width', '?'),
+                    getattr(info, 'token_height', '?'), getattr(info, 'token_width', '?'),
+                    getattr(info, 'image_token_length', '?'),
+                )
+            else:
+                logger.info("[DEBUG]   gen_image_info: None")
+
         tokenizer_output_dict = tokenizer.apply_chat_template(**tokenizer_kwargs)
         # The output format: dict with 'output' and 'sections'
         if isinstance(tokenizer_output_dict, dict):
             tokenizer_output = tokenizer_output_dict.get("output", tokenizer_output_dict)
         else:
             tokenizer_output = tokenizer_output_dict
+
+        if _debug:
+            logger.info("[DEBUG] === TOKENIZER OUTPUT ===")
+            if hasattr(tokenizer_output, 'tokens') and tokenizer_output.tokens is not None:
+                logger.info("[DEBUG]   output tokens shape: %s", tuple(tokenizer_output.tokens.shape))
+            if hasattr(tokenizer_output, 'gen_image_mask') and tokenizer_output.gen_image_mask is not None:
+                logger.info("[DEBUG]   gen_image_mask shape: %s, sum_per_row=%s",
+                    tuple(tokenizer_output.gen_image_mask.shape),
+                    tokenizer_output.gen_image_mask.sum(dim=-1).tolist())
+            if hasattr(tokenizer_output, 'gen_timestep_scatter_index') and tokenizer_output.gen_timestep_scatter_index is not None:
+                logger.info("[DEBUG]   gen_timestep_scatter_index: shape=%s values=%s",
+                    tuple(tokenizer_output.gen_timestep_scatter_index.shape),
+                    tokenizer_output.gen_timestep_scatter_index.tolist())
+            # Log sections if available
+            sections = None
+            if isinstance(tokenizer_output_dict, dict):
+                sections = tokenizer_output_dict.get("sections")
+            if sections:
+                logger.info("[DEBUG]   sections count: %d", len(sections))
+                for i, sec in enumerate(sections):
+                    sec_types = [s.get('type', '?') for s in sec if isinstance(s, dict)]
+                    logger.info("[DEBUG]     section[%d]: %d items, types=%s", i, len(sec), sec_types)
 
         # Extract tensors from tokenizer output
         if hasattr(tokenizer_output, "tokens"):
