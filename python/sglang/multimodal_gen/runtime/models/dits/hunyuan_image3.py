@@ -572,20 +572,20 @@ class HunYuanAttention(nn.Module):
                 "[L%d attn] attn_output: %s std=%.6f",
                 self.layer_id, tuple(attn_output.shape), attn_output.float().std().item(),
             )
-            # Branch diff at image positions (attn_output is [total_tokens, heads*head_dim])
-            if attn_meta is not None and len(attn_meta.query_lens) >= 2:
-                _n_img = attn_meta.num_image_tokens
-                _total = attn_output.shape[0]
-                _bs = len(attn_meta.query_lens)
-                _slen = _total // _bs
-                if _n_img > 0 and _n_img < _slen:
-                    _ao = attn_output.float()
-                    _a0 = _ao[:_slen][_slen - _n_img:]
-                    _a1 = _ao[_slen:2*_slen][_slen - _n_img:]
-                    _layer_debug_log(
-                        "[L%d attn] attn_img_branch_diff=%.6f",
-                        self.layer_id, (_a0 - _a1).std().item(),
-                    )
+            # # Branch diff at image positions (attn_output is [total_tokens, heads*head_dim])
+            # if attn_meta is not None and len(attn_meta.query_lens) >= 2:
+            #     _n_img = attn_meta.num_image_tokens
+            #     _total = attn_output.shape[0]
+            #     _bs = len(attn_meta.query_lens)
+            #     _slen = _total // _bs
+            #     if _n_img > 0 and _n_img < _slen:
+            #         _ao = attn_output.float()
+            #         _a0 = _ao[:_slen][_slen - _n_img:]
+            #         _a1 = _ao[_slen:2*_slen][_slen - _n_img:]
+            #         _layer_debug_log(
+            #             "[L%d attn] attn_img_branch_diff=%.6f",
+            #             self.layer_id, (_a0 - _a1).std().item(),
+            #         )
 
         output, _ = self.o_proj(attn_output)
 
