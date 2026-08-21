@@ -5,7 +5,6 @@ Implements the diffusion sampling loop directly using the sglang backbone's
 """
 
 import os
-import sys
 from functools import partial
 from typing import Any, Optional
 
@@ -302,69 +301,50 @@ class HunyuanImage3AR(PipelineStage):
     # ------------------------------------------------------------------
 
     def _resolve_custom_tokenizer(self, server_args: ServerArgs):
-        """Load the custom HunyuanImage3 tokenizer (once)."""
+        """Load base tokenizer + sglang-native HunyuanImage3 wrapper.
+
+        Uses ``AutoTokenizer.from_pretrained`` (without ``trust_remote_code``)
+        to get the base ``PreTrainedTokenizerFast``, then wraps it in
+        ``HunyuanImage3TokenizerWrapper`` which provides the multimodal
+        ``apply_chat_template`` entry point.
+        """
         if self._custom_tokenizer is not None:
             return self._custom_tokenizer
 
         model_path = self._model_path
         if not model_path:
             raise ValueError(
-                "HunyuanImage3AR requires a model_path to load the custom tokenizer."
+                "HunyuanImage3AR requires a model_path to load the tokenizer."
             )
 
-        # Try loading the custom tokenizer class from the model repo
-        try:
-            from transformers.dynamic_module_utils import (
-                get_class_from_dynamic_module,
-            )
+        from transformers import AutoTokenizer
 
-            tokenizer_cls = get_class_from_dynamic_module(
-                "tokenization_hunyuan_image_3.HunyuanImage3TokenizerFast",
-                model_path,
-                revision=server_args.revision,
-            )
-            self._custom_tokenizer = tokenizer_cls.from_pretrained(
-                model_path,
-                revision=server_args.revision,
-                trust_remote_code=server_args.trust_remote_code,
-            )
-            logger.info("Loaded custom HunyuanImage3 tokenizer from %s", model_path)
-        except Exception as e:
-            logger.warning(
-                "Failed to load custom tokenizer from %s: %s. "
-                "Falling back to AutoTokenizer.",
-                model_path,
-                e,
-            )
-            from transformers import AutoTokenizer
+        from .hunyuan_image3_tokenizer import HunyuanImage3TokenizerWrapper
 
-            self._custom_tokenizer = AutoTokenizer.from_pretrained(
-                model_path,
-                revision=server_args.revision,
-                trust_remote_code=server_args.trust_remote_code,
-            )
+        # Load the base tokenizer (no trust_remote_code)
+        base_tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            revision=server_args.revision,
+        )
+
+        # Wrap in our sglang-native tokenizer wrapper
+        self._custom_tokenizer = HunyuanImage3TokenizerWrapper(base_tokenizer)
+        logger.info(
+            "Loaded base tokenizer + HunyuanImage3TokenizerWrapper from %s",
+            model_path,
+        )
         return self._custom_tokenizer
 
     def _get_image_info_class(self, tokenizer):
-        """Extract the ImageInfo class from the tokenizer's module namespace.
+        """Return the ``ImageInfo`` class from our tokenizer wrapper module.
 
-        The tokenizer and processor may load ``tokenization_hunyuan_image_3.py``
-        from different ``transformers_modules`` cache directories, producing
-        different Python classes with the same name.  To avoid ``isinstance``
-        failures inside the tokenizer, we always use the ``ImageInfo`` class
-        that lives in the *tokenizer's* module.
+        The ``HunyuanImage3TokenizerWrapper`` performs ``isinstance`` checks
+        against its own ``ImageInfo`` class.  We return that class so
+        ``_rebuild_image_info`` can convert the processor's ImageInfo
+        into the correct type.
         """
-        tok_mod = sys.modules.get(tokenizer.__class__.__module__)
-        if tok_mod is not None and hasattr(tok_mod, "ImageInfo"):
-            return tok_mod.ImageInfo
-        # Fallback: search parent modules
-        parts = tokenizer.__class__.__module__.split(".")
-        for i in range(len(parts) - 1, 0, -1):
-            parent = ".".join(parts[:i])
-            mod = sys.modules.get(parent)
-            if mod is not None and hasattr(mod, "ImageInfo"):
-                return mod.ImageInfo
-        return None
+        from .hunyuan_image3_tokenizer import ImageInfo as WrapperImageInfo
+        return WrapperImageInfo
 
     def _rebuild_image_info(self, image_info, ImageInfoCls):
         """Re-create *image_info* as an instance of *ImageInfoCls*.
