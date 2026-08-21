@@ -921,16 +921,10 @@ class HunyuanImage3AR(PipelineStage):
             )
 
         # 6. Set up the diffusion scheduler
-        # Resolve num_inference_steps with priority:
-        # 1. User-explicit value from sampling params
-        # 2. Model generation_config default (diff_infer_steps)
-        # 3. Hardcoded fallback (_DEFAULT_NUM_INFERENCE_STEPS)
-        if "num_inference_steps" in user_explicit_fields:
-            num_inference_steps = int(sp.num_inference_steps)
-            _steps_source = "user"
-        else:
-            num_inference_steps = self._read_num_inference_steps()
-            _steps_source = "generation_config"
+        num_inference_steps = int(
+            getattr(batch, "num_inference_steps", None) or _DEFAULT_NUM_INFERENCE_STEPS
+        )
+
 
         logger.info(
             "HunyuanImage3AR effective params: num_inference_steps=%d (from %s), "
