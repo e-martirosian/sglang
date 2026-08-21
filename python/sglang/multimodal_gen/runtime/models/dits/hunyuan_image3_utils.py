@@ -66,8 +66,8 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1, mla
 
     Supports both full-dim (cos/sin last dim == q last dim) and half-dim
     (cos/sin last dim == q last dim // 2) layouts.  The half-dim layout
-    applies each rotation angle to a PAIR of consecutive dimensions,
-    matching the original HunyuanImage-3 model's ``rotated_half`` mode.
+    expands cos/sin to full dim via repeat_interleave, then applies
+    neox-style rotate_half (dim i paired with dim i+D/2, same theta).
     """
     if position_ids is not None:
         cos = cos[position_ids]
@@ -91,31 +91,24 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1, mla
         k_embed = (k * cos) + (rotate_half(k) * sin)
     else:
         # Half-dim RoPE: cos/sin has head_dim//2 elements.
-        # Reshape q/k into pairs and apply each angle to a pair.
+        # The angles from build_2d_rope are ordered as
+        # [θ_y0, θ_x0, θ_y1, θ_x1, ...] (interleaved y/x per frequency).
+        #
+        # Expand to full head_dim by repeating each element:
+        #   [θ_y0, θ_x0, θ_y1, θ_x1, ...]
+        #   → [θ_y0, θ_y0, θ_x0, θ_x0, θ_y1, θ_y1, θ_x1, θ_x1, ...]
+        # Then rotate_half pairs dim i with dim i+D/2 (same theta).
+        # This matches vllm-omni's neox-style RoPE application.
         assert cos_dim == head_dim // 2, (
             f"cos last dim {cos_dim} must be head_dim//2 ({head_dim // 2})"
         )
-        # q/k: [bs, num_heads, seq_len, head_dim] -> [bs, num_heads, seq_len, head_dim//2, 2]
-        q_shape = q.shape
-        k_shape = k.shape
-        q = q.reshape(*q_shape[:-1], head_dim // 2, 2)
-        k = k.reshape(*k_shape[:-1], head_dim // 2, 2)
-        # cos/sin from build_batch_2d_rope have shape [B, seq_len, cos_dim].
-        # We need them to broadcast with q/k shape [B, num_heads, seq_len, cos_dim, 2].
-        # Insert num_heads dim at position 1 and pair dim at the end.
-        # [B, seq_len, cos_dim] -> [B, 1, seq_len, cos_dim, 1]
-        cos = cos.unsqueeze(1).unsqueeze(-1)
-        sin = sin.unsqueeze(1).unsqueeze(-1)
+        cos = cos.repeat_interleave(2, dim=-1)
+        sin = sin.repeat_interleave(2, dim=-1)
+        cos = cos.unsqueeze(unsqueeze_dim)
+        sin = sin.unsqueeze(unsqueeze_dim)
 
-        q_embed = (q * cos) + (
-            torch.stack((-q[..., 1], q[..., 0]), dim=-1) * sin
-        )
-        k_embed = (k * cos) + (
-            torch.stack((-k[..., 1], k[..., 0]), dim=-1) * sin
-        )
-        # Restore original shape
-        q_embed = q_embed.reshape(q_shape)
-        k_embed = k_embed.reshape(k_shape)
+        q_embed = (q * cos) + (rotate_half(q) * sin)
+        k_embed = (k * cos) + (rotate_half(k) * sin)
 
     return q_embed, k_embed
 
