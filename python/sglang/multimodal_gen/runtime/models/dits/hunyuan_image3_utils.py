@@ -62,23 +62,58 @@ def rotate_half(x):
 
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1, mla=False):
-    """Applies Rotary Position Embedding to the query and key tensors."""
+    """Applies Rotary Position Embedding to the query and key tensors.
+
+    Supports both full-dim (cos/sin last dim == q last dim) and half-dim
+    (cos/sin last dim == q last dim // 2) layouts.  The half-dim layout
+    applies each rotation angle to a PAIR of consecutive dimensions,
+    matching the original HunyuanImage-3 model's ``rotated_half`` mode.
+    """
     if position_ids is not None:
         cos = cos[position_ids]
         sin = sin[position_ids]
 
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
+    head_dim = q.shape[-1]
+    cos_dim = cos.shape[-1]
 
-    if mla:
-        b, h, s, d = q.shape
-        q = q.reshape(b, h, s, d // 2, 2).transpose(4, 3).reshape(b, h, s, d)
+    if cos_dim == head_dim:
+        # Standard full-dim RoPE (original path)
+        cos = cos.unsqueeze(unsqueeze_dim)
+        sin = sin.unsqueeze(unsqueeze_dim)
 
-        b, h, s, d = k.shape
-        k = k.reshape(b, h, s, d // 2, 2).transpose(4, 3).reshape(b, h, s, d)
+        if mla:
+            b, h, s, d = q.shape
+            q = q.reshape(b, h, s, d // 2, 2).transpose(4, 3).reshape(b, h, s, d)
+            b, h, s, d = k.shape
+            k = k.reshape(b, h, s, d // 2, 2).transpose(4, 3).reshape(b, h, s, d)
 
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
+        q_embed = (q * cos) + (rotate_half(q) * sin)
+        k_embed = (k * cos) + (rotate_half(k) * sin)
+    else:
+        # Half-dim RoPE: cos/sin has head_dim//2 elements.
+        # Reshape q/k into pairs and apply each angle to a pair.
+        assert cos_dim == head_dim // 2, (
+            f"cos last dim {cos_dim} must be head_dim//2 ({head_dim // 2})"
+        )
+        # q: [..., head_dim] -> [..., head_dim//2, 2]
+        q_shape = q.shape
+        k_shape = k.shape
+        q = q.reshape(*q_shape[:-1], head_dim // 2, 2)
+        k = k.reshape(*k_shape[:-1], head_dim // 2, 2)
+        # cos/sin: [..., cos_dim] -> [..., 1, cos_dim, 1] for broadcasting
+        cos = cos.unsqueeze(unsqueeze_dim).unsqueeze(-1)
+        sin = sin.unsqueeze(unsqueeze_dim).unsqueeze(-1)
+
+        q_embed = (q * cos) + (
+            torch.stack((-q[..., 1], q[..., 0]), dim=-1) * sin
+        )
+        k_embed = (k * cos) + (
+            torch.stack((-k[..., 1], k[..., 0]), dim=-1) * sin
+        )
+        # Restore original shape
+        q_embed = q_embed.reshape(q_shape)
+        k_embed = k_embed.reshape(k_shape)
+
     return q_embed, k_embed
 
 
@@ -133,8 +168,9 @@ class HunYuanRotary2DEmbedder:
         bs = len(attn_meta.query_lens)
         q_len = total_tokens // bs
 
-        q = q.reshape(bs, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.reshape(bs, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        # Cast to float32 for RoPE precision (matching vllm-omni)
+        q = q.reshape(bs, q_len, self.num_heads, self.head_dim).transpose(1, 2).to(torch.float32)
+        k = k.reshape(bs, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2).to(torch.float32)
 
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
@@ -258,7 +294,7 @@ def build_2d_rope(
     y_pos = y_pos[:seq_len]
     all_pos = torch.stack((y_pos, x_pos), dim=1).unsqueeze(1).to(device)  # [seq_len, 1, 2]
 
-    idx_theta = (all_pos * theta).reshape(all_pos.shape[0], n_elem // 2).repeat(1, 2)
+    idx_theta = (all_pos * theta).reshape(all_pos.shape[0], n_elem // 2).repeat(1, 1)
     cos = torch.cos(idx_theta)
     sin = torch.sin(idx_theta)
 
