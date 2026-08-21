@@ -720,6 +720,24 @@ class HunyuanImage3AR(PipelineStage):
             if timestep_index is not None:
                 timestep_index = timestep_index.to(device)
 
+        if _debug:
+            if timestep_index is not None:
+                n_ts_pos = timestep_index.sum(dim=-1) if timestep_index.dtype == torch.bool else (timestep_index > 0).sum(dim=-1)
+                logger.info(
+                    "[DEBUG] timestep_index: shape=%s marked_per_row=%s",
+                    tuple(timestep_index.shape),
+                    n_ts_pos.tolist(),
+                )
+            else:
+                logger.warning("[DEBUG] timestep_index is None!")
+            if image_mask is not None:
+                n_img_pos = image_mask.sum(dim=-1)
+                logger.info(
+                    "[DEBUG] image_mask: shape=%s marked_per_row=%s",
+                    tuple(image_mask.shape),
+                    n_img_pos.tolist(),
+                )
+
         # 4. Build attention mask (4D causal + full attn at image positions)
         image_slices = getattr(tokenizer_output, "gen_image_slices", [[] for _ in range(actual_batch_size)])
         if not isinstance(image_slices[0], list):
