@@ -781,6 +781,20 @@ class HunyuanImage3AR(PipelineStage):
                     hidden_states = self.ar_model.model.get_input_embeddings(input_ids)
                     if _debug:
                         logger.info("[DEBUG] step%d text_emb: %s", step_idx, _tensor_stats(hidden_states))
+                        # Compare text embeddings at differing positions
+                        if actual_batch_size >= 2:
+                            diff_pos_list = (input_ids[0].cpu() != input_ids[1].cpu()).nonzero(as_tuple=True)[0]
+                            if len(diff_pos_list) > 0:
+                                emb0 = hidden_states[0, diff_pos_list].float().detach()
+                                emb1 = hidden_states[1, diff_pos_list].float().detach()
+                                diff_norm = (emb0 - emb1).norm(dim=-1)
+                                logger.info(
+                                    "[DEBUG]   text_emb at %d diff positions: "
+                                    "mean_diff_norm=%.6f max_diff_norm=%.6f",
+                                    len(diff_pos_list),
+                                    diff_norm.mean().item(),
+                                    diff_norm.max().item(),
+                                )
                     # Scatter VAE image embeddings at image positions
                     hidden_states = self._instantiate_vae_tokens_first_step(
                         hidden_states, latent_model_input, t_expand, image_mask,
