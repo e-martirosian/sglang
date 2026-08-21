@@ -1189,16 +1189,15 @@ class HunyuanImage3ForCausalMM(CachableDiT):
 
         cla_factor = _get_cla_factor(self.hf_config)
 
-        expert_gate_up_mapping = []
+        expert_fused_mapping = []
         expert_down_mapping = []
         if _is_moe(self.hf_config):
             num_experts = self.hf_config.num_experts
-            # Stacked mapping for per-expert gate_proj / up_proj → gate_up_proj
-            expert_gate_up_mapping = [
-                (f"experts.{eid}.gate_up_proj", f"experts.{eid}.gate_proj", 0)
-                for eid in range(num_experts)
-            ] + [
-                (f"experts.{eid}.gate_up_proj", f"experts.{eid}.up_proj", 1)
+            # Checkpoint stores fused gate_and_up_proj for each expert.
+            # MergedColumnParallelLinear.weight_loader(param, weight) with
+            # no shard_id handles the internal split automatically.
+            expert_fused_mapping = [
+                (f"experts.{eid}.gate_up_proj", f"experts.{eid}.gate_and_up_proj")
                 for eid in range(num_experts)
             ]
             # Direct mapping for per-expert down_proj
@@ -1289,9 +1288,10 @@ class HunyuanImage3ForCausalMM(CachableDiT):
             if is_found:
                 continue
 
-            # Expert gate_proj / up_proj → gate_up_proj (stacked)
+            # Expert fused gate_and_up_proj → gate_up_proj (loaded without shard_id;
+            # MergedColumnParallelLinear splits internally)
             is_found = False
-            for param_name, weight_name, shard_id in expert_gate_up_mapping:
+            for param_name, weight_name in expert_fused_mapping:
                 if weight_name not in name:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
@@ -1299,7 +1299,7 @@ class HunyuanImage3ForCausalMM(CachableDiT):
                     continue
                 param = params_dict[name_mapped]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader(param, loaded_weight)
                 loaded_params.add(name_mapped)
                 is_found = True
                 break
