@@ -834,6 +834,22 @@ class HunyuanImage3AR(PipelineStage):
 
                 if _debug:
                     logger.info("[DEBUG] step%d backbone_out: %s", step_idx, _tensor_stats(backbone_out))
+                    # Check backbone output diff between CFG branches at image vs text positions
+                    if actual_batch_size >= 2:
+                        bb0 = backbone_out[0].float().detach()
+                        bb1 = backbone_out[1].float().detach()
+                        img_mask_1d = image_mask[0].bool().cpu()
+                        n_img = img_mask_1d.sum().item()
+                        if n_img > 0:
+                            img_diff = (bb0[img_mask_1d] - bb1[img_mask_1d])
+                            txt_mask_1d = ~img_mask_1d
+                            n_txt = txt_mask_1d.sum().item()
+                            txt_diff = (bb0[txt_mask_1d] - bb1[txt_mask_1d]) if n_txt > 0 else None
+                            logger.info(
+                                "[DEBUG]   backbone branch diff: image_pos(%d) std=%.6f | text_pos(%d) std=%s",
+                                n_img, img_diff.std().item(),
+                                n_txt, f"{txt_diff.std().item():.6f}" if txt_diff is not None else "N/A",
+                            )
 
                 # Extract diffusion prediction
                 pred = self._extract_diffusion_pred(
