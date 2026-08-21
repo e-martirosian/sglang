@@ -513,9 +513,14 @@ class ImageKVCacheManager:
 
         attention_mask = attention_mask.contiguous()
 
-        attn_output = F.scaled_dot_product_attention(
-            query, key, value, attn_mask=attention_mask, dropout_p=0.0
-        )
+        # 4D bool mask is incompatible with FlashAttention; prefer efficient.
+        with torch.nn.attention.sdpa_kernel([
+            torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
+            torch.nn.attention.SDPBackend.MATH,
+        ]):
+            attn_output = F.scaled_dot_product_attention(
+                query, key, value, attn_mask=attention_mask, dropout_p=0.0
+            )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(total_tokens, head_num_per_rank, head_dim)
