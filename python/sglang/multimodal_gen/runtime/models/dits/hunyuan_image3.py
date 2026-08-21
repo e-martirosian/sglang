@@ -1158,6 +1158,35 @@ class HunyuanImage3ForCausalMM(CachableDiT):
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
+        # Log missing weights (model params not loaded from checkpoint)
+        all_param_names = set(params_dict.keys())
+        missing = all_param_names - loaded_params
+        if missing:
+            # Filter out expected missing patterns
+            significant_missing = [
+                n for n in missing
+                if not any(k in n for k in ["rotary_emb", "lm_head"])
+            ]
+            if significant_missing:
+                logger.warning(
+                    "Weight loading: %d/%d params loaded, %d MISSING:",
+                    len(loaded_params), len(all_param_names), len(significant_missing),
+                )
+                for n in sorted(significant_missing)[:30]:
+                    logger.warning("  MISSING: %s", n)
+                if len(significant_missing) > 30:
+                    logger.warning("  ... and %d more", len(significant_missing) - 30)
+            else:
+                logger.info(
+                    "Weight loading: %d/%d params loaded (all accounted for)",
+                    len(loaded_params), len(all_param_names),
+                )
+        else:
+            logger.info(
+                "Weight loading: %d/%d params loaded (complete)",
+                len(loaded_params), len(all_param_names),
+            )
         return loaded_params
 
 
