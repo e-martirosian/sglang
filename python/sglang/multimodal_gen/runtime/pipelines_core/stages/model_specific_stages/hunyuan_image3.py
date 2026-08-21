@@ -34,6 +34,19 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 
+
+def _tensor_stats(t: torch.Tensor) -> str:
+    """Compact tensor stats for debug logging."""
+    if t is None:
+        return "None"
+    tf = t.float().detach()
+    return (
+        f"shape={tuple(tf.shape)} dtype={t.dtype} "
+        f"min={tf.min().item():.6f} max={tf.max().item():.6f} "
+        f"mean={tf.mean().item():.6f} std={tf.std().item():.6f}"
+    )
+
+
 # Default sampling parameters (from generation_config.json)
 _DEFAULT_NUM_INFERENCE_STEPS = 50
 _DEFAULT_GUIDANCE_SCALE = 2.5
@@ -723,6 +736,7 @@ class HunyuanImage3AR(PipelineStage):
         backbone_fn = partial(self._backbone_forward, num_image_tokens)
 
         # 8. Diffusion sampling loop
+        _debug = os.environ.get("HUNYUAN_DEBUG", "0") == "1"
         for step_idx, t in enumerate(timesteps):
             first_step = step_idx == 0
 
@@ -740,20 +754,28 @@ class HunyuanImage3AR(PipelineStage):
                 if first_step:
                     # Embed text tokens
                     hidden_states = self.ar_model.model.get_input_embeddings(input_ids)
+                    if _debug:
+                        logger.info("[DEBUG] step%d text_emb: %s", step_idx, _tensor_stats(hidden_states))
                     # Scatter VAE image embeddings at image positions
                     hidden_states = self._instantiate_vae_tokens_first_step(
                         hidden_states, latent_model_input, t_expand, image_mask,
                     )
+                    if _debug:
+                        logger.info("[DEBUG] step%d after_vae_scatter: %s", step_idx, _tensor_stats(hidden_states))
                     # Scatter timestep embedding
                     if timestep_index is not None:
                         hidden_states = self._instantiate_timestep_tokens(
                             hidden_states, t_expand, timestep_index,
                         )
+                    if _debug:
+                        logger.info("[DEBUG] step%d after_ts_scatter: %s", step_idx, _tensor_stats(hidden_states))
                 else:
                     # No text tokens: build from scratch
                     hidden_states = self._build_non_first_step_input(
                         t_expand, latent_model_input, actual_batch_size,
                     )
+                    if _debug:
+                        logger.info("[DEBUG] step%d non_first_input: %s", step_idx, _tensor_stats(hidden_states))
 
                 # Select the correct RoPE and attention mask for this step
                 if first_step:
@@ -763,10 +785,16 @@ class HunyuanImage3AR(PipelineStage):
                     step_cos, step_sin = non_first_cos, non_first_sin
                     step_attn_mask = non_first_attention_mask
 
+                if _debug:
+                    logger.info("[DEBUG] step%d backbone_in: hidden=%s cos=%s", step_idx, _tensor_stats(hidden_states), _tensor_stats(step_cos))
+
                 # Run backbone
                 backbone_out = backbone_fn(
                     hidden_states, step_attn_mask, (step_cos, step_sin), first_step,
                 )
+
+                if _debug:
+                    logger.info("[DEBUG] step%d backbone_out: %s", step_idx, _tensor_stats(backbone_out))
 
                 # Extract diffusion prediction
                 pred = self._extract_diffusion_pred(
@@ -775,16 +803,24 @@ class HunyuanImage3AR(PipelineStage):
                     num_special_tokens=seq_len - num_image_tokens,
                 )
 
+                if _debug:
+                    logger.info("[DEBUG] step%d pred_before_cfg: %s", step_idx, _tensor_stats(pred))
+
             pred = pred.float()
 
             # Classifier-free guidance
             if do_cfg:
                 pred_cond, pred_uncond = pred.chunk(2)
                 pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+                if _debug:
+                    logger.info("[DEBUG] step%d pred_after_cfg: %s", step_idx, _tensor_stats(pred))
 
             # Scheduler step (latents is always batch_size=1)
             latent_dtype = latents.dtype
             latents = scheduler.step(pred, t, latents, return_dict=False)[0].to(dtype=latent_dtype)
+
+            if _debug:
+                logger.info("[DEBUG] step%d latents: %s", step_idx, _tensor_stats(latents))
 
             # After first step, text tokens are no longer needed
             if first_step:
