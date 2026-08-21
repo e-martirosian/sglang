@@ -100,10 +100,11 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1, mla
         k_shape = k.shape
         q = q.reshape(*q_shape[:-1], head_dim // 2, 2)
         k = k.reshape(*k_shape[:-1], head_dim // 2, 2)
-        # cos/sin: [..., cos_dim] -> [..., cos_dim, 1] for broadcasting
-        # against the pair dimension (size 2) of q/k.
-        cos = cos.unsqueeze(-1)
-        sin = sin.unsqueeze(-1)
+        # Expand cos/sin to exactly match q/k shape so no broadcasting
+        # ambiguity can occur regardless of cos/sin input dimensionality.
+        # cos/sin: [..., cos_dim] -> [..., cos_dim, 1]
+        cos = cos.unsqueeze(-1).expand_as(q)
+        sin = sin.unsqueeze(-1).expand_as(k)
 
         q_embed = (q * cos) + (
             torch.stack((-q[..., 1], q[..., 0]), dim=-1) * sin
