@@ -413,6 +413,34 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
+# ------------------------------------------------------------------
+# Primitive attention: works on any device (NPU, CUDA, …) using only
+# basic tensor ops — no FlashAttention / SDPA backend needed.
+# ------------------------------------------------------------------
+
+def _attention_forward(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Primitive scaled dot-product attention.
+
+    Works on any device (NPU, CUDA, …) using only basic tensor ops.
+    All tensors in **BNSD** layout ``[batch, heads, seq_len, head_dim]``.
+    ``attention_mask`` is a 4-D bool tensor ``[B, 1, Q, K]``
+    (True = attend, False = mask out).
+    """
+    scale = 1.0 / (query.shape[-1] ** 0.5)
+    # [B, N, Q, D] @ [B, N, D, K] → [B, N, Q, K]
+    attn_weights = torch.matmul(query, key.transpose(-2, -1)) * scale
+    # Apply mask: set masked positions to -inf before softmax
+    attn_weights = attn_weights.masked_fill(~attention_mask, float("-inf"))
+    attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    # [B, N, Q, K] @ [B, N, K, D] → [B, N, Q, D]
+    return torch.matmul(attn_weights, value)
+
+
 class ImageKVCacheManager:
     """
     Manages specialized caching and updating of KV-Cache for image tokens.
@@ -512,15 +540,7 @@ class ImageKVCacheManager:
         value = repeat_kv(value, repeat_num)
 
         attention_mask = attention_mask.contiguous()
-
-        # 4D bool mask is incompatible with FlashAttention; prefer efficient.
-        with torch.nn.attention.sdpa_kernel([
-            torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
-            torch.nn.attention.SDPBackend.MATH,
-        ]):
-            attn_output = F.scaled_dot_product_attention(
-                query, key, value, attn_mask=attention_mask, dropout_p=0.0
-            )
+        attn_output = _attention_forward(query, key, value, attention_mask)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(total_tokens, head_num_per_rank, head_dim)
