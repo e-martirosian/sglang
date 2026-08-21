@@ -181,27 +181,36 @@ def _build_causal_attention_mask(
 def _build_rope_image_info(
     tokenizer_output: Any,
     batch_size: int,
+    token_h: int,
+    token_w: int,
+    image_info: Any = None,
 ) -> list[list[tuple[slice, tuple[int, int]]]]:
-    """Extract 2D-RoPE image info from the tokenizer output.
+    """Build 2D-RoPE image info from tokenizer output and image dimensions.
 
     Returns a per-batch list of ``[(slice, (token_h, token_w)), ...]`` tuples
     describing where image tokens sit in the sequence and their spatial layout.
+
+    Prefers ``token_height`` / ``token_width`` from *image_info* (which matches
+    the vllm-omni ``build_hunyuan_batch_rope_image_info`` that reads from the
+    tokenizer's *sections*).  Falls back to the explicit *token_h* / *token_w*
+    computed from the VAE downsample factor when *image_info* is ``None``.
     """
     gen_slices = getattr(tokenizer_output, "gen_image_slices", None)
-    gen_image_info = getattr(tokenizer_output, "batch_gen_image_info", None)
+
+    # Resolve spatial dims: prefer image_info attrs, fall back to explicit args
+    if image_info is not None:
+        th = getattr(image_info, "token_height", token_h)
+        tw = getattr(image_info, "token_width", token_w)
+    else:
+        th, tw = token_h, token_w
 
     rope_image_info: list[list[tuple[slice, tuple[int, int]]]] = []
     for b in range(batch_size):
         batch_info: list[tuple[slice, tuple[int, int]]] = []
-        if gen_slices is not None and gen_image_info is not None:
-            info = gen_image_info[b] if isinstance(gen_image_info, list) else gen_image_info
+        if gen_slices is not None:
             slices = gen_slices[b] if isinstance(gen_slices[0], list) else gen_slices
-            if info is not None and slices:
-                token_h = getattr(info, "token_height", None)
-                token_w = getattr(info, "token_width", None)
-                if token_h is not None and token_w is not None:
-                    for s in slices:
-                        batch_info.append((s, (token_h, token_w)))
+            for s in slices:
+                batch_info.append((s, (th, tw)))
         rope_image_info.append(batch_info)
     return rope_image_info
 
@@ -730,7 +739,9 @@ class HunyuanImage3AR(PipelineStage):
         )
 
         # 5. Build 2D RoPE image info and compute cached cos/sin
-        rope_image_info = _build_rope_image_info(tokenizer_output, actual_batch_size)
+        rope_image_info = _build_rope_image_info(
+            tokenizer_output, actual_batch_size, token_h, token_w, image_info
+        )
         cos, sin = self.ar_model.cached_rope(seq_len, device, rope_image_info=rope_image_info)
 
         # Pre-build RoPE for non-first steps (shorter sequence: 1 timestep + image tokens).
