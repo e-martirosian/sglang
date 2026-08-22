@@ -729,16 +729,17 @@ class _GroupedExperts(nn.Module):
 
     Stores w13_weight (gate+up fused) and w2_weight (down) as packed tensors
     compatible with sglang's fused_experts triton kernel.
+    intermediate_size here is the **per-partition** size (already divided by tp_size).
     """
 
-    def __init__(self, num_experts: int, hidden_size: int, intermediate_size: int):
+    def __init__(self, num_experts: int, hidden_size: int, intermediate_size_per_partition: int):
         super().__init__()
         self.num_experts = num_experts
         self.w13_weight = nn.Parameter(
-            torch.empty(num_experts, 2 * intermediate_size, hidden_size)
+            torch.empty(num_experts, 2 * intermediate_size_per_partition, hidden_size)
         )
         self.w2_weight = nn.Parameter(
-            torch.empty(num_experts, hidden_size, intermediate_size)
+            torch.empty(num_experts, hidden_size, intermediate_size_per_partition)
         )
 
 
@@ -767,6 +768,7 @@ class HunYuanSparseMoeBlock(nn.Module):
         if getattr(config, "moe_intermediate_size", None) is not None:
             intermediate_size = _get_layer_value(config, "moe_intermediate_size", layer_id)
 
+        intermediate_size_per_partition = intermediate_size // self.tp_size
         self.intermediate_size = intermediate_size
         self.top_k = top_k
         self.renormalize = getattr(config, "norm_topk_prob", top_k > 1)
@@ -780,14 +782,14 @@ class HunYuanSparseMoeBlock(nn.Module):
         self.experts = _GroupedExperts(
             num_experts=config.num_experts,
             hidden_size=config.hidden_size,
-            intermediate_size=intermediate_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
         )
 
         self._moe_runner_config = MoeRunnerConfig(
             num_experts=config.num_experts,
             num_local_experts=config.num_experts,
             hidden_size=config.hidden_size,
-            intermediate_size_per_partition=intermediate_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
             top_k=top_k,
             activation="silu",
             is_gated=True,
