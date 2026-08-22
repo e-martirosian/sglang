@@ -446,8 +446,8 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 # ------------------------------------------------------------------
-# Primitive attention: works on any device (NPU, CUDA, …) using only
-# basic tensor ops — no FlashAttention / SDPA backend needed.
+# Attention: uses F.scaled_dot_product_attention to match vllm-omni's
+# SDPA backend exactly.  Works on any device (NPU, CUDA, CPU).
 # ------------------------------------------------------------------
 
 def _attention_forward(
@@ -456,21 +456,24 @@ def _attention_forward(
     value: torch.Tensor,
     attention_mask: torch.Tensor,
 ) -> torch.Tensor:
-    """Primitive scaled dot-product attention.
+    """Scaled dot-product attention matching vllm-omni's SDPA path.
 
-    Works on any device (NPU, CUDA, …) using only basic tensor ops.
     All tensors in **BNSD** layout ``[batch, heads, seq_len, head_dim]``.
     ``attention_mask`` is a 4-D bool tensor ``[B, 1, Q, K]``
     (True = attend, False = mask out).
     """
     scale = 1.0 / (query.shape[-1] ** 0.5)
-    # [B, N, Q, D] @ [B, N, D, K] → [B, N, Q, K]
-    attn_weights = torch.matmul(query, key.transpose(-2, -1)) * scale
-    # Apply mask: set masked positions to -inf before softmax
-    attn_weights = attn_weights.masked_fill(~attention_mask, float("-inf"))
-    attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
-    # [B, N, Q, K] @ [B, N, K, D] → [B, N, Q, D]
-    return torch.matmul(attn_weights, value)
+    # F.scaled_dot_product_attention selects the best available kernel
+    # (flash, memory-efficient, or math) and handles the bool mask
+    # internally — identical to vllm-omni's SDPAImpl._forward_impl.
+    output = F.scaled_dot_product_attention(
+        query, key, value,
+        attn_mask=attention_mask,
+        dropout_p=0.0,
+        is_causal=False,
+        scale=scale,
+    )
+    return output
 
 
 class ImageKVCacheManager:
