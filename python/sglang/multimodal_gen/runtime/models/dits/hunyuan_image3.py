@@ -47,6 +47,7 @@ def _layer_debug_log(msg, *args):
 
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.multimodal_gen.runtime.distributed import (
+    get_tp_rank,
     get_tp_world_size,
     tensor_model_parallel_all_reduce,
 )
@@ -1167,7 +1168,13 @@ class HunyuanImage3ForCausalMM(CachableDiT):
 
         cla_factor = _get_cla_factor(self.hf_config)
 
-        # Expert params mapping for FusedMoE weight_loader
+        # Expert params mapping for FusedMoE weight loading.
+        # Checkpoint stores fused gate_and_up_proj per expert.
+        # expert_weights_remapping maps gate_proj/up_proj → gate_and_up_proj with offset/den.
+        expert_weights_remapping = {
+            "gate_proj": ("gate_and_up_proj", 1, 2),
+            "up_proj": ("gate_and_up_proj", 0, 2),
+        }
         expert_params_mapping = []
         if _is_moe(self.hf_config):
             expert_params_mapping = FusedMoE.make_expert_params_mapping(
@@ -1259,62 +1266,81 @@ class HunyuanImage3ForCausalMM(CachableDiT):
             if is_found:
                 continue
 
-            # Expert weights: use FusedMoE weight_loader which handles TP sharding.
-            # Checkpoint may store per-expert weights as:
-            #   (a) separate gate_proj / up_proj / down_proj, or
-            #   (b) fused gate_and_up_proj + down_proj.
+            # Expert weights: FusedMoE w13_weight / w2_weight with TP sharding.
+            # Checkpoint stores fused gate_and_up_proj + down_proj per expert.
+            # We split the fused weight and shard each half for TP.
             is_found = False
             if _is_moe(self.hf_config) and "mlp.experts" in name:
-                # Check for fused gate_and_up_proj format
+                tp_rank = get_tp_rank()
+                tp_world = get_tp_world_size()
+
+                # --- fused gate_and_up_proj ---
                 m_fused = re.search(r"experts\.(\d+)\.gate_and_up_proj", name)
                 if m_fused is not None:
-                    # Split fused weight into gate/up halves and load separately
                     expert_id = int(m_fused.group(1))
                     fused_weight = loaded_weight
-                    half = fused_weight.shape[0] // 2
-                    gate_weight = fused_weight[:half]
-                    up_weight = fused_weight[half:]
+                    full_intermediate = fused_weight.shape[0] // 2
+                    per_partition = full_intermediate // tp_world
+                    gate_full = fused_weight[:full_intermediate]
+                    up_full = fused_weight[full_intermediate:]
+                    gate_shard = gate_full[tp_rank * per_partition:(tp_rank + 1) * per_partition]
+                    up_shard = up_full[tp_rank * per_partition:(tp_rank + 1) * per_partition]
+                    w13_shard = torch.cat([gate_shard, up_shard], dim=0)
 
+                    w13_name = name.replace(
+                        f"experts.{expert_id}.gate_and_up_proj", "experts.w13_weight"
+                    )
+                    if w13_name in params_dict:
+                        params_dict[w13_name].data[expert_id].copy_(w13_shard)
+                        loaded_params.add(w13_name)
+                    is_found = True
+
+                # --- down_proj ---
+                if not is_found:
+                    m_down = re.search(r"experts\.(\d+)\.down_proj", name)
+                    if m_down is not None:
+                        expert_id = int(m_down.group(1))
+                        full_intermediate = loaded_weight.shape[-1]
+                        per_partition = full_intermediate // tp_world
+                        w2_shard = loaded_weight[:, tp_rank * per_partition:(tp_rank + 1) * per_partition]
+
+                        w2_name = name.replace(
+                            f"experts.{expert_id}.down_proj", "experts.w2_weight"
+                        )
+                        if w2_name in params_dict:
+                            params_dict[w2_name].data[expert_id].copy_(w2_shard)
+                            loaded_params.add(w2_name)
+                        is_found = True
+
+                # --- separate gate_proj / up_proj (fallback) ---
+                if not is_found:
                     for mapping in expert_params_mapping:
                         param_name, weight_name, eid, shard_id = mapping
-                        if eid != expert_id:
-                            continue
-                        name_mapped = name.replace(
-                            f"experts.{expert_id}.gate_and_up_proj", param_name
-                        )
-                        if name_mapped not in params_dict:
-                            continue
-                        param = params_dict[name_mapped]
-                        # gate_proj → first half, up_proj → second half
-                        if "gate_proj" in weight_name:
-                            w = gate_weight
-                        elif "up_proj" in weight_name:
-                            w = up_weight
-                        else:
-                            continue
-                        param.weight_loader(
-                            param, w, name_mapped,
-                            shard_id=shard_id, expert_id=eid,
-                        )
-                        loaded_params.add(name_mapped)
-                    is_found = True
-                else:
-                    # Separate gate_proj / up_proj / down_proj format
-                    for mapping in expert_params_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
+                        # Apply expert_weights_remapping
+                        offset, den = 0, 1
+                        for remap_key, remap_info in expert_weights_remapping.items():
+                            if remap_key in weight_name:
+                                remap_name, offset, den = remap_info
+                                weight_name = weight_name.replace(remap_key, remap_name)
+                                break
                         if weight_name not in name:
                             continue
                         name_mapped = name.replace(weight_name, param_name)
-                        if name_mapped.endswith(".bias") and name_mapped not in params_dict:
-                            continue
                         if name_mapped not in params_dict:
                             continue
+                        # Slice loaded weight by offset/den
+                        units = loaded_weight.shape[0] // den
+                        w_shard_full = loaded_weight[offset * units:(offset + 1) * units]
+                        # TP shard
+                        per_part = w_shard_full.shape[0] // tp_world
+                        w_shard = w_shard_full[tp_rank * per_part:(tp_rank + 1) * per_part]
                         param = params_dict[name_mapped]
-                        weight_loader = param.weight_loader
-                        weight_loader(
-                            param, loaded_weight, name_mapped,
-                            shard_id=shard_id, expert_id=expert_id,
-                        )
+                        # Place at correct offset in w13_weight
+                        param_units = param.shape[1] // 2
+                        if shard_id == "w1":
+                            param.data[eid, :param_units].copy_(w_shard)
+                        elif shard_id == "w3":
+                            param.data[eid, param_units:].copy_(w_shard)
                         loaded_params.add(name_mapped)
                         is_found = True
                         break
