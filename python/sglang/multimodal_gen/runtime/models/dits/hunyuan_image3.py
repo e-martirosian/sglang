@@ -40,34 +40,6 @@ from transformers import PretrainedConfig
 
 logger = logging.getLogger(__name__)
 
-
-def _layer_debug_log(msg, *args):
-    if os.environ.get("HUNYUAN_DEBUG"):
-        logger.info(msg, *args)
-
-
-def _log_branch_diff(h, r, bs, num_img, tag, layer_id):
-    """Log per-stage branch diff (txt/img/all) for diffusion debugging."""
-    if not os.environ.get("HUNYUAN_DEBUG") or bs < 2:
-        return
-    seq_len = h.shape[0] // bs
-    eff = h if r is None else h + r
-    h0 = eff[:seq_len].float()
-    h1 = eff[seq_len:2 * seq_len].float()
-    all_diff = (h0 - h1).std().item()
-    if num_img > 0 and num_img < seq_len:
-        txt_diff = (h0[:seq_len - num_img] - h1[:seq_len - num_img]).std().item()
-        img_diff = (h0[seq_len - num_img:] - h1[seq_len - num_img:]).std().item()
-        _layer_debug_log(
-            "[L%d %s] all=%.6f txt=%.6f img=%.6f",
-            layer_id, tag, all_diff, txt_diff, img_diff,
-        )
-    else:
-        _layer_debug_log(
-            "[L%d %s] all=%.6f",
-            layer_id, tag, all_diff,
-        )
-
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
 from sglang.multimodal_gen.runtime.distributed import (
@@ -555,25 +527,6 @@ class HunYuanAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        _do_log = os.environ.get("HUNYUAN_DEBUG")
-        if _do_log:
-            _layer_debug_log(
-                "[L%d attn] qkv_proj: q=%s std=%.6f | k=%s std=%.6f | v=%s std=%.6f",
-                self.layer_id, tuple(q.shape), q.float().std().item(),
-                tuple(k.shape), k.float().std().item(),
-                tuple(v.shape), v.float().std().item(),
-            )
-            # QKV branch_diff (before RoPE)
-            _qf = q.float(); _sl = _qf.shape[0] // 2
-            _layer_debug_log("[L%d attn] qkv_q_branch_diff: %.6f",
-                self.layer_id, (_qf[:_sl] - _qf[_sl:2*_sl]).std().item())
-            _kf = k.float(); _sl = _kf.shape[0] // 2
-            _layer_debug_log("[L%d attn] qkv_k_branch_diff: %.6f",
-                self.layer_id, (_kf[:_sl] - _kf[_sl:2*_sl]).std().item())
-            _vf = v.float(); _sl = _vf.shape[0] // 2
-            _layer_debug_log("[L%d attn] qkv_v_branch_diff: %.6f",
-                self.layer_id, (_vf[:_sl] - _vf[_sl:2*_sl]).std().item())
-
         if attn_meta is not None:
             assert positions is None
             q, k = self.image_rope2d_emb(q, k, hidden_states, custom_pos_emb, attn_meta)
@@ -581,142 +534,20 @@ class HunYuanAttention(nn.Module):
             q, k = self.rotary_emb(positions, q, k)
         ori_k = k
 
-        if _do_log:
-            _layer_debug_log(
-                "[L%d attn] rope_q_after: shape=%s dtype=%s std=%.6f",
-                self.layer_id, tuple(q.shape), q.dtype, q.float().std().item(),
-            )
-            _layer_debug_log(
-                "[L%d attn] rope_k_after: shape=%s dtype=%s std=%.6f",
-                self.layer_id, tuple(k.shape), k.dtype, k.float().std().item(),
-            )
-            _hs = q.float()
-            _sl = _hs.shape[0] // 2
-            _layer_debug_log("[L%d attn] rope_q_branch_diff: %.6f",
-                self.layer_id, (_hs[:_sl] - _hs[_sl:2*_sl]).std().item())
-            _hs = k.float()
-            _sl = _hs.shape[0] // 2
-            _layer_debug_log("[L%d attn] rope_k_branch_diff: %.6f",
-                self.layer_id, (_hs[:_sl] - _hs[_sl:2*_sl]).std().item())
-
         if self.use_qk_norm:
             q = self.query_layernorm(q.view(-1, self.num_heads, self.head_dim).contiguous())
             k = self.key_layernorm(k.view(-1, self.num_kv_heads, self.head_dim).contiguous())
-            if _do_log:
-                _layer_debug_log(
-                    "[L%d attn] qk_norm_q: std=%.6f",
-                    self.layer_id, q.float().std().item(),
-                )
-                _layer_debug_log(
-                    "[L%d attn] qk_norm_k: std=%.6f",
-                    self.layer_id, k.float().std().item(),
-                )
-                _qf = q.float()
-                _sl = _qf.shape[0] // 2
-                _layer_debug_log("[L%d attn] qk_norm_q_branch_diff: %.6f",
-                    self.layer_id, (_qf[:_sl] - _qf[_sl:2*_sl]).std().item())
-                _kf = k.float()
-                _sl = _kf.shape[0] // 2
-                _layer_debug_log("[L%d attn] qk_norm_k_branch_diff: %.6f",
-                    self.layer_id, (_kf[:_sl] - _kf[_sl:2*_sl]).std().item())
 
         if attn_meta is not None:
-            attn_output = self.image_attn(q, k, v, attn_meta, attention_mask=attention_mask)
+            attn_output = self.image_attn(q, k, v, attn_meta, attention_mask=attention_mask, layer_id=self.layer_id)
         else:
             q = q.view(-1, self.num_heads, self.head_dim)
             k = k.view(-1, self.num_kv_heads, self.head_dim)
             v = v.view(-1, self.num_kv_heads, self.head_dim)
             attn_output = self.attn(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0))
 
-            # Manual attention in fp32 to compare with optimized kernel
-            if _do_log:
-                _bs = q.unsqueeze(0).shape[0]
-                _sl = q.unsqueeze(0).shape[1]
-                _nh = q.shape[-2]
-                _hd = q.shape[-1]
-                _mq = q.view(_bs, _sl, _nh, _hd).transpose(1, 2).float()
-                _mk = k.view(_bs, _sl, self.num_kv_heads, _hd).transpose(1, 2).float()
-                _mv = v.view(_bs, _sl, self.num_kv_heads, _hd).transpose(1, 2).float()
-                if _nh != self.num_kv_heads:
-                    _rep = _nh // self.num_kv_heads
-                    _mk = _mk.repeat_interleave(_rep, dim=1)
-                    _mv = _mv.repeat_interleave(_rep, dim=1)
-                _qs = (_mq @ _mk.transpose(-2, -1)) * self.scaling
-                _causal = torch.triu(torch.ones(_sl, _sl, device=_qs.device, dtype=torch.bool), diagonal=1)
-                _qs.masked_fill_(_causal.unsqueeze(0).unsqueeze(0), float('-inf'))
-                _sp = torch.softmax(_qs, dim=-1)
-                _mout = (_sp @ _mv).transpose(1, 2).reshape(_bs * _sl, _nh * _hd)
-                _opt = attn_output.float()
-                _layer_debug_log("[L%d attn] MANUAL_QK: max=%.4f min=%.4f std=%.4f",
-                    self.layer_id, _qs.max().item(), _qs.min().item(), _qs.std().item())
-                _layer_debug_log("[L%d attn] MANUAL_SOFTMAX: max=%.6f std=%.6f",
-                    self.layer_id, _sp.max().item(), _sp.std().item())
-                _layer_debug_log("[L%d attn] MANUAL_attn_output: std=%.6f branch_diff=%.6f",
-                    self.layer_id, _mout.std().item(),
-                    (_mout[:_sl] - _mout[_sl:2*_sl]).std().item())
-                _layer_debug_log("[L%d attn] OPT_vs_MANUAL: diff=%.6f (opt=%.6f)",
-                    self.layer_id, (_opt - _mout).std().item(), _opt.std().item())
-                _ao = attn_output.float()
-                _sl2 = _ao.shape[0] // 2
-                _layer_debug_log("[L%d attn] OPT_attn_branch_diff: %.6f",
-                    self.layer_id, (_ao[:_sl2] - _ao[_sl2:2*_sl2]).std().item())
-
         attn_output = attn_output.view(q.shape[0], -1)
-
-        if _do_log:
-            _layer_debug_log(
-                "[L%d attn] attn_output: %s std=%.6f",
-                self.layer_id, tuple(attn_output.shape), attn_output.float().std().item(),
-            )
-            # Branch diff at image positions (attn_output is [total_tokens, heads*head_dim])
-            if attn_meta is not None and len(attn_meta.query_lens) >= 2:
-                _n_img = attn_meta.num_image_tokens
-                _total = attn_output.shape[0]
-                _bs = len(attn_meta.query_lens)
-                _slen = _total // _bs
-                if _n_img > 0 and _n_img < _slen:
-                    _ao = attn_output.float()
-                    _a0 = _ao[:_slen]
-                    _a1 = _ao[_slen:2*_slen]
-                    _layer_debug_log(
-                        "[L%d attn] attn_img_branch_diff=%.6f",
-                        self.layer_id, (_a0[_slen - _n_img:] - _a1[_slen - _n_img:]).std().item(),
-                    )
-                    _layer_debug_log(
-                        "[L%d attn] attn_branch: all=%.6f txt=%.6f img=%.6f",
-                        self.layer_id,
-                        (_a0 - _a1).std().item(),
-                        (_a0[:_slen - _n_img] - _a1[:_slen - _n_img]).std().item(),
-                        (_a0[_slen - _n_img:] - _a1[_slen - _n_img:]).std().item(),
-                    )
-
         output, _ = self.o_proj(attn_output)
-
-        if _do_log:
-            _layer_debug_log(
-                "[L%d attn] o_proj output: %s std=%.6f",
-                self.layer_id, tuple(output.shape), output.float().std().item(),
-            )
-            _of = output.float()
-            _osl = _of.shape[0] // 2
-            _layer_debug_log("[L%d attn] oproj_branch_diff: %.6f",
-                self.layer_id, (_of[:_osl] - _of[_osl:2*_osl]).std().item())
-            if attn_meta is not None and len(attn_meta.query_lens) >= 2:
-                _n_img = attn_meta.num_image_tokens
-                _total = output.shape[0]
-                _bs = len(attn_meta.query_lens)
-                _slen = _total // _bs
-                if _n_img > 0 and _n_img < _slen:
-                    _oo = output.float()
-                    _o0 = _oo[:_slen]
-                    _o1 = _oo[_slen:2*_slen]
-                    _layer_debug_log(
-                        "[L%d attn] oproj_branch: all=%.6f txt=%.6f img=%.6f",
-                        self.layer_id,
-                        (_o0 - _o1).std().item(),
-                        (_o0[:_slen - _n_img] - _o1[:_slen - _n_img]).std().item(),
-                        (_o0[_slen - _n_img:] - _o1[_slen - _n_img:]).std().item(),
-                    )
 
         return output, (ori_k, v)
 
@@ -798,23 +629,6 @@ class HunYuanCrossAttention(nn.Module):
 
         q, _ = self.q_proj(hidden_states)
 
-        _do_log = os.environ.get("HUNYUAN_DEBUG")
-        if _do_log:
-            _layer_debug_log(
-                "[L%d cross_attn] q_proj: %s std=%.6f | k(from_master): std=%.6f | v(from_master): std=%.6f",
-                self.layer_id, tuple(q.shape), q.float().std().item(),
-                k.float().std().item(), v.float().std().item(),
-            )
-            _qf = q.float(); _sl = _qf.shape[0] // 2
-            _layer_debug_log("[L%d cross_attn] q_branch_diff: %.6f",
-                self.layer_id, (_qf[:_sl] - _qf[_sl:2*_sl]).std().item())
-            _kf = k.float(); _sl = _kf.shape[0] // 2
-            _layer_debug_log("[L%d cross_attn] k_branch_diff: %.6f",
-                self.layer_id, (_kf[:_sl] - _kf[_sl:2*_sl]).std().item())
-            _vf = v.float(); _sl = _vf.shape[0] // 2
-            _layer_debug_log("[L%d cross_attn] v_branch_diff: %.6f",
-                self.layer_id, (_vf[:_sl] - _vf[_sl:2*_sl]).std().item())
-
         if attn_meta is not None:
             assert positions is None
             q, _ = self.image_rope2d_emb(
@@ -824,82 +638,20 @@ class HunYuanCrossAttention(nn.Module):
             k_tmp = torch.empty_like(k)
             q, _ = self.rotary_emb(positions, q, k_tmp)
 
-        if _do_log:
-            _layer_debug_log(
-                "[L%d cross_attn] rope_q_after: shape=%s dtype=%s std=%.6f",
-                self.layer_id, tuple(q.shape), q.dtype, q.float().std().item(),
-            )
-            _hs = q.float()
-            _sl = _hs.shape[0] // 2
-            _layer_debug_log("[L%d cross_attn] rope_q_branch_diff: %.6f",
-                self.layer_id, (_hs[:_sl] - _hs[_sl:2*_sl]).std().item())
-
         if self.use_qk_norm:
             q = self.query_layernorm(q.view(-1, self.num_heads, self.head_dim).contiguous())
             k = self.key_layernorm(k.view(-1, self.num_kv_heads, self.head_dim).contiguous())
-            if _do_log:
-                _layer_debug_log(
-                    "[L%d cross_attn] qk_norm_q: std=%.6f",
-                    self.layer_id, q.float().std().item(),
-                )
-                _qf = q.float()
-                _sl = _qf.shape[0] // 2
-                _layer_debug_log("[L%d cross_attn] qk_norm_q_branch_diff: %.6f",
-                    self.layer_id, (_qf[:_sl] - _qf[_sl:2*_sl]).std().item())
 
         if attn_meta is not None:
-            attn_output = self.image_attn(q, k, v, attn_meta, attention_mask=attention_mask)
+            attn_output = self.image_attn(q, k, v, attn_meta, attention_mask=attention_mask, layer_id=self.layer_id)
         else:
             q = q.view(-1, self.num_heads, self.head_dim)
             k = k.view(-1, self.num_kv_heads, self.head_dim)
             v = v.view(-1, self.num_kv_heads, self.head_dim)
             attn_output = self.attn(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0))
 
-            # Manual attention in fp32 to compare with optimized kernel
-            if _do_log:
-                _bs = q.unsqueeze(0).shape[0]
-                _sl = q.unsqueeze(0).shape[1]
-                _nh = q.shape[-2]
-                _hd = q.shape[-1]
-                _mq = q.view(_bs, _sl, _nh, _hd).transpose(1, 2).float()
-                _mk = k.view(_bs, _sl, self.num_kv_heads, _hd).transpose(1, 2).float()
-                _mv = v.view(_bs, _sl, self.num_kv_heads, _hd).transpose(1, 2).float()
-                if _nh != self.num_kv_heads:
-                    _rep = _nh // self.num_kv_heads
-                    _mk = _mk.repeat_interleave(_rep, dim=1)
-                    _mv = _mv.repeat_interleave(_rep, dim=1)
-                _qs = (_mq @ _mk.transpose(-2, -1)) * self.scaling
-                _causal = torch.triu(torch.ones(_sl, _sl, device=_qs.device, dtype=torch.bool), diagonal=1)
-                _qs.masked_fill_(_causal.unsqueeze(0).unsqueeze(0), float('-inf'))
-                _sp = torch.softmax(_qs, dim=-1)
-                _mout = (_sp @ _mv).transpose(1, 2).reshape(_bs * _sl, _nh * _hd)
-                _opt = attn_output.float()
-                _layer_debug_log("[L%d cross_attn] MANUAL_QK: max=%.4f min=%.4f std=%.4f",
-                    self.layer_id, _qs.max().item(), _qs.min().item(), _qs.std().item())
-                _layer_debug_log("[L%d cross_attn] MANUAL_SOFTMAX: max=%.6f std=%.6f",
-                    self.layer_id, _sp.max().item(), _sp.std().item())
-                _layer_debug_log("[L%d cross_attn] MANUAL_attn_output: std=%.6f branch_diff=%.6f",
-                    self.layer_id, _mout.std().item(),
-                    (_mout[:_sl] - _mout[_sl:2*_sl]).std().item())
-                _layer_debug_log("[L%d cross_attn] OPT_vs_MANUAL: diff=%.6f (opt=%.6f)",
-                    self.layer_id, (_opt - _mout).std().item(), _opt.std().item())
-                _ao = attn_output.float()
-                _sl2 = _ao.shape[0] // 2
-                _layer_debug_log("[L%d cross_attn] OPT_attn_branch_diff: %.6f",
-                    self.layer_id, (_ao[:_sl2] - _ao[_sl2:2*_sl2]).std().item())
-
         attn_output = attn_output.view(q.shape[0], -1)
         output, _ = self.o_proj(attn_output)
-
-        if _do_log:
-            _layer_debug_log(
-                "[L%d cross_attn] output: %s std=%.6f",
-                self.layer_id, tuple(output.shape), output.float().std().item(),
-            )
-            _of = output.float()
-            _osl = _of.shape[0] // 2
-            _layer_debug_log("[L%d cross_attn] oproj_branch_diff: %.6f",
-                self.layer_id, (_of[:_osl] - _of[_osl:2*_osl]).std().item())
 
         return output, (ori_k, v)
 
@@ -964,50 +716,13 @@ class HunYuanSparseMoeBlock(nn.Module):
             with_bias=getattr(config, "mlp_bias", False),
         )
 
-        # CRITICAL DIAGNOSTIC: log TP config to verify MoE TP synchronization
-        logger.info(
-            "[MOE_CONFIG] layer=%d  moe_tp_size=%d  moe_ep_size=%d  "
-            "reduce_results=False  hidden_size=%d  intermediate_size=%d  "
-            "experts_intermediate_size_per_partition=%d",
-            layer_id,
-            self.experts.moe_tp_size,
-            self.experts.moe_ep_size,
-            config.hidden_size,
-            intermediate_size,
-            self.experts.intermediate_size_per_partition,
-        )
-
     def forward(self, hidden_states):
         orig_shape = hidden_states.shape
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        _do_moe_log = os.environ.get("HUNYUAN_DEBUG")
-
         # Router logits: [num_tokens, num_experts]
-        if _do_moe_log:
-            _layer_debug_log(
-                "[L%d moe] moe_input: shape=%s dtype=%s std=%.6f",
-                self.layer_id, tuple(hidden_states.shape), hidden_states.dtype,
-                hidden_states.float().std().item(),
-            )
         router_logits, _ = self.gate(hidden_states)
-
-        if _do_moe_log:
-            _layer_debug_log(
-                "[L%d moe] moe_router_logits: shape=%s mean=%.6f std=%.6f max=%.6f",
-                self.layer_id, tuple(router_logits.shape),
-                router_logits.float().mean().item(),
-                router_logits.float().std().item(),
-                router_logits.float().max().item(),
-            )
-            _rlf = router_logits.float()
-            _rl_sl = _rlf.shape[0] // 2
-            _layer_debug_log(
-                "[L%d moe] router_logits_branch_diff: %.6f",
-                self.layer_id,
-                (_rlf[:_rl_sl] - _rlf[_rl_sl:2*_rl_sl]).std().item(),
-            )
 
         # TopK routing: softmax + top-k selection
         topk_output = self.topk(hidden_states, router_logits)
@@ -1015,85 +730,16 @@ class HunYuanSparseMoeBlock(nn.Module):
         # FusedMoE expert computation
         final_hidden_states = self.experts(hidden_states, topk_output)
 
-        # Sync to ensure FusedMoE's async all_reduce completes before measuring
-        if _do_moe_log:
-            try:
-                import torch_npu
-                torch_npu.npu.synchronize()
-            except Exception:
-                pass
-
-        if _do_moe_log:
-            _layer_debug_log(
-                "[L%d moe] moe_output: shape=%s dtype=%s std=%.6f",
-                self.layer_id, tuple(final_hidden_states.shape),
-                final_hidden_states.dtype, final_hidden_states.float().std().item(),
-            )
-            _bs = 2
-            _slen = final_hidden_states.shape[0] // _bs
-            _fe0 = final_hidden_states[:_slen].float()
-            _fe1 = final_hidden_states[_slen:2*_slen].float()
-            _layer_debug_log(
-                "[L%d moe] fused_experts: all=%.6f absmean=%.6f",
-                self.layer_id, (_fe0 - _fe1).std().item(),
-                final_hidden_states.float().abs().mean().item(),
-            )
-
         # Shared MLP contribution (always applied to all tokens)
         if self.shared_mlp is not None:
             _shared_out = self.shared_mlp(hidden_states)
-            # Sync to ensure shared_mlp's async operations complete
-            if _do_moe_log:
-                try:
-                    import torch_npu
-                    torch_npu.npu.synchronize()
-                except Exception:
-                    pass
-            if _do_moe_log:
-                _bs = 2
-                _slen = _shared_out.shape[0] // _bs
-                _sh0 = _shared_out[:_slen].float()
-                _sh1 = _shared_out[_slen:2*_slen].float()
-                _layer_debug_log(
-                    "[L%d moe] shared_mlp: all=%.6f absmean=%.6f",
-                    self.layer_id, (_sh0 - _sh1).std().item(),
-                    _shared_out.float().abs().mean().item(),
-                )
             final_hidden_states = final_hidden_states + _shared_out
-
-            if _do_moe_log:
-                _bs = 2
-                _slen = final_hidden_states.shape[0] // _bs
-                _fc0 = final_hidden_states[:_slen].float()
-                _fc1 = final_hidden_states[_slen:2*_slen].float()
-                _layer_debug_log(
-                    "[L%d moe] combined: all=%.6f absmean=%.6f shape=%s",
-                    self.layer_id, (_fc0 - _fc1).std().item(),
-                    final_hidden_states.float().abs().mean().item(),
-                    tuple(final_hidden_states.shape),
-                )
 
         # NOTE: The AscendTPDispatcher's finalize routing performs all-gather
         # internally for the FusedMoE output on NPU. The shared MLP's down_proj
         # uses reduce_results=True to all-reduce its output across TP ranks.
         # Both components are now properly TP-synchronized.
 
-        if _do_moe_log:
-            _out = final_hidden_states.view(orig_shape)
-            _bs = 2
-            _slen = _out.shape[0] // _bs
-            _o0 = _out[:_slen].float()
-            _o1 = _out[_slen:2*_slen].float()
-            _layer_debug_log(
-                "[L%d moe] moe_return: all=%.6f absmean=%.6f shape=%s orig_shape=%s",
-                self.layer_id, (_o0 - _o1).std().item(),
-                _out.float().abs().mean().item(),
-                tuple(_out.shape), tuple(orig_shape),
-            )
-            _layer_debug_log(
-                "[L%d moe] moe_branch_diff: %.6f",
-                self.layer_id, (_o0 - _o1).std().item(),
-            )
         return final_hidden_states.view(orig_shape)
 
 
@@ -1150,78 +796,20 @@ class HunyuanImage3DecoderLayer(nn.Module):
         self, positions, hidden_states, forward_batch, residual,
         kv_states=None, attn_meta=None, attention_mask=None, custom_pos_emb=None,
     ):
-        _do_log = os.environ.get("HUNYUAN_DEBUG")
         if attention_mask is not None:
-            # Branch-diff tracking state: effective = _bh + _br
-            _bh = None
-            _br = None
-            if _do_log:
-                _bh = hidden_states
-                _layer_debug_log(
-                    "[L%d layer] in: %s std=%.6f",
-                    self.layer_id, tuple(hidden_states.shape), hidden_states.float().std().item(),
-                )
-                _log_branch_diff(_bh, _br, 2, self._num_img_log, "in", self.layer_id)
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
-            if _do_log:
-                _layer_debug_log(
-                    "[L%d layer] after_input_ln: std=%.6f",
-                    self.layer_id, hidden_states.float().std().item(),
-                )
-                _log_branch_diff(hidden_states, residual, 2, self._num_img_log, "after_input_ln", self.layer_id)
             hidden_states, ori_kv_states = self.self_attn(
                 positions=positions, hidden_states=hidden_states,
                 forward_batch=forward_batch, kv_states=kv_states,
                 attn_meta=attn_meta, attention_mask=attention_mask,
                 custom_pos_emb=custom_pos_emb,
             )
-            # Compact per-layer measurement: raw attention output diff (no residual)
-            if os.environ.get("HUNYUAN_DEBUG"):
-                _attn_diff = (hidden_states[:hidden_states.shape[0]//2].float() - hidden_states[hidden_states.shape[0]//2:].float()).std().item()
-                _layer_debug_log("[L%d layer] raw_attn_out: std=%.6f branch_diff=%.6f", self.layer_id, hidden_states.float().std().item(), _attn_diff)
             hidden_states = residual + hidden_states
-            if _do_log:
-                _layer_debug_log(
-                    "[L%d layer] after_attn_res: std=%.6f",
-                    self.layer_id, hidden_states.float().std().item(),
-                )
-                _log_branch_diff(hidden_states, None, 2, self._num_img_log, "after_attn_res", self.layer_id)
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)
-            if _do_log:
-                _layer_debug_log(
-                    "[L%d layer] after_post_attn_ln: std=%.6f",
-                    self.layer_id, hidden_states.float().std().item(),
-                )
-                _log_branch_diff(hidden_states, residual, 2, self._num_img_log, "after_post_attn_ln", self.layer_id)
-                # Also log raw post_attn_ln diff (without residual)
-                _log_branch_diff(hidden_states, None, 2, self._num_img_log, "after_post_attn_ln_raw", self.layer_id)
             hidden_states = self.mlp(hidden_states)
-            # Compact per-layer measurement: raw MLP output diff (no residual)
-            if os.environ.get("HUNYUAN_DEBUG"):
-                try:
-                    import torch_npu
-                    torch_npu.npu.synchronize()
-                except Exception:
-                    pass
-                _mlp_diff = (hidden_states[:hidden_states.shape[0]//2].float() - hidden_states[hidden_states.shape[0]//2:].float()).std().item()
-                _layer_debug_log("[L%d layer] raw_mlp_out: std=%.6f branch_diff=%.6f", self.layer_id, hidden_states.float().std().item(), _mlp_diff)
-            if _do_log:
-                _layer_debug_log(
-                    "[L%d layer] after_mlp: std=%.6f absmean=%.6f",
-                    self.layer_id, hidden_states.float().std().item(),
-                    hidden_states.float().abs().mean().item(),
-                )
-                _log_branch_diff(hidden_states, residual, 2, self._num_img_log, "after_mlp", self.layer_id)
-                _log_branch_diff(hidden_states, None, 2, self._num_img_log, "after_mlp_raw", self.layer_id)
             hidden_states = residual + hidden_states
-            if _do_log:
-                _layer_debug_log(
-                    "[L%d layer] out: std=%.6f",
-                    self.layer_id, hidden_states.float().std().item(),
-                )
-                _log_branch_diff(hidden_states, None, 2, self._num_img_log, "out", self.layer_id)
         else:
             if residual is None:
                 residual = hidden_states
@@ -1297,20 +885,9 @@ class HunyuanImage3Model(nn.Module):
                 attention_mask, num_image_tokens, first_step
             )
 
-        _do_log = os.environ.get("HUNYUAN_DEBUG")
-        # Get actual batch size from attention mask (hidden_states is 2D: [B*S, H])
-        if attention_mask is not None:
-            _real_bs = attention_mask.shape[0]
-        elif attn_meta is not None:
-            _real_bs = len(attn_meta.query_lens)
-        else:
-            _real_bs = hidden_states.shape[0] if hidden_states.dim() == 3 else 1
-        _num_img = num_image_tokens or (attn_meta.num_image_tokens if attn_meta else 0)
-
         cla_factor = _get_cla_factor(self.config)
         prev_kv_states = None
         for i, layer in enumerate(self.layers):
-            layer._num_img_log = _num_img
             hidden_states, residual, kv_states = layer(
                 None, hidden_states, None, residual,
                 prev_kv_states, attn_meta, attention_mask, custom_pos_emb,
@@ -1319,34 +896,6 @@ class HunyuanImage3Model(nn.Module):
                 prev_kv_states = kv_states
             else:
                 prev_kv_states = None
-
-            if _do_log and _real_bs >= 2 and hidden_states.dim() == 2:
-                seq_len = hidden_states.shape[0] // _real_bs
-                h0 = hidden_states[:seq_len].float()
-                h1 = hidden_states[seq_len:2*seq_len].float()
-                all_diff = (h0 - h1).std().item()
-                # Image-position branch diff (image tokens at end of sequence)
-                if _num_img > 0 and _num_img < seq_len:
-                    img0 = h0[seq_len - _num_img:]
-                    img1 = h1[seq_len - _num_img:]
-                    img_diff = (img0 - img1).std().item()
-                    txt_diff = (h0[:seq_len - _num_img] - h1[:seq_len - _num_img]).std().item()
-                    _layer_debug_log(
-                        "[backbone] L%d out: std0=%.6f std1=%.6f | "
-                        "all_diff=%.6f txt_diff=%.6f img_diff=%.6f",
-                        i, h0.std().item(), h1.std().item(),
-                        all_diff, txt_diff, img_diff,
-                    )
-                else:
-                    _layer_debug_log(
-                        "[backbone] L%d out: std0=%.6f std1=%.6f all_diff=%.6f",
-                        i, h0.std().item(), h1.std().item(), all_diff,
-                    )
-            elif _do_log:
-                _layer_debug_log(
-                    "[backbone] L%d out: %s std=%.6f",
-                    i, tuple(hidden_states.shape), hidden_states.float().std().item(),
-                )
 
         return hidden_states.contiguous()
 

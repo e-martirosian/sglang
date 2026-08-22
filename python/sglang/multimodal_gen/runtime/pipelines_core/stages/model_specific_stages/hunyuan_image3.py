@@ -34,18 +34,6 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 
-def _tensor_stats(t: torch.Tensor) -> str:
-    """Compact tensor stats for debug logging."""
-    if t is None:
-        return "None"
-    tf = t.float().detach()
-    return (
-        f"shape={tuple(tf.shape)} dtype={t.dtype} "
-        f"min={tf.min().item():.6f} max={tf.max().item():.6f} "
-        f"mean={tf.mean().item():.6f} std={tf.std().item():.6f}"
-    )
-
-
 # Default sampling parameters (from generation_config.json)
 _DEFAULT_NUM_INFERENCE_STEPS = 50
 _DEFAULT_GUIDANCE_SCALE = 2.5
@@ -602,11 +590,6 @@ class HunyuanImage3AR(PipelineStage):
         """Extract the noise prediction from backbone output via final_layer."""
         n_embd = hidden_states.size(-1)
         t_emb = self.ar_model.time_embed_2(timesteps)
-        _is_debug = os.environ.get("HUNYUAN_DEBUG", "0") == "1"
-
-        if _is_debug:
-            logger.info("[DEBUG] final_layer_in: hidden=%s t_emb=%s",
-                        _tensor_stats(hidden_states), _tensor_stats(t_emb))
 
         if first_step:
             # Select image positions using the mask
@@ -617,13 +600,7 @@ class HunyuanImage3AR(PipelineStage):
             # Non-first step: skip the timestep token (position 0)
             image_output = hidden_states[:, 1:, :]
 
-        if _is_debug:
-            logger.info("[DEBUG] final_layer_img_input: %s", _tensor_stats(image_output))
-
         pred = self.ar_model.final_layer(image_output, t_emb, token_h, token_w)
-
-        if _is_debug:
-            logger.info("[DEBUG] final_layer_out: %s", _tensor_stats(pred))
 
         return pred
 
@@ -679,7 +656,6 @@ class HunyuanImage3AR(PipelineStage):
             device = model_device
 
         # 3. Build input sequence using the custom tokenizer
-        _debug = os.environ.get("HUNYUAN_DEBUG", "0") == "1"
         batch_size = 1
 
         # Resolve guidance_scale with priority:
@@ -732,77 +708,12 @@ class HunyuanImage3AR(PipelineStage):
         if image_info is not None:
             tokenizer_kwargs["batch_gen_image_info"] = [image_info]
 
-        if _debug:
-            logger.info("[DEBUG] === TOKENIZER INPUTS ===")
-            logger.info("[DEBUG]   batch.prompt (raw): %r", batch.prompt)
-            logger.info("[DEBUG]   bot_task: %s, sys_type: %s", bot_task, sys_type)
-            logger.info("[DEBUG]   sequence_template: %s, drop_think: %s", self._get_sequence_template(), self._drop_think)
-            logger.info("[DEBUG]   cfg_factor: %d, do_cfg: %s", cfg_factor, do_cfg)
-            logger.info("[DEBUG]   image_base_size: %s", tokenizer_kwargs.get("image_base_size"))
-            sp = tokenizer_kwargs.get("batch_system_prompt")
-            if sp:
-                logger.info("[DEBUG]   system_prompt: len=%d first100=%r", len(sp[0]), sp[0][:100])
-            else:
-                logger.info("[DEBUG]   system_prompt: None (NOT SET)")
-            img_info = tokenizer_kwargs.get("batch_gen_image_info")
-            if img_info and img_info[0] is not None:
-                info = img_info[0]
-                logger.info(
-                    "[DEBUG]   gen_image_info: image_height=%s image_width=%s token_height=%s token_width=%s image_token_length=%s",
-                    getattr(info, 'image_height', '?'), getattr(info, 'image_width', '?'),
-                    getattr(info, 'token_height', '?'), getattr(info, 'token_width', '?'),
-                    getattr(info, 'image_token_length', '?'),
-                )
-            else:
-                logger.info("[DEBUG]   gen_image_info: None")
-
         tokenizer_output_dict = tokenizer.apply_chat_template(**tokenizer_kwargs)
         # The output format: dict with 'output' and 'sections'
         if isinstance(tokenizer_output_dict, dict):
             tokenizer_output = tokenizer_output_dict.get("output", tokenizer_output_dict)
         else:
             tokenizer_output = tokenizer_output_dict
-
-        if _debug:
-            logger.info("[DEBUG] === TOKENIZER OUTPUT ===")
-            if hasattr(tokenizer_output, 'tokens') and tokenizer_output.tokens is not None:
-                logger.info("[DEBUG]   output tokens shape: %s", tuple(tokenizer_output.tokens.shape))
-            if hasattr(tokenizer_output, 'gen_image_mask') and tokenizer_output.gen_image_mask is not None:
-                logger.info("[DEBUG]   gen_image_mask shape: %s, sum_per_row=%s",
-                    tuple(tokenizer_output.gen_image_mask.shape),
-                    tokenizer_output.gen_image_mask.sum(dim=-1).tolist())
-            if hasattr(tokenizer_output, 'gen_timestep_scatter_index') and tokenizer_output.gen_timestep_scatter_index is not None:
-                logger.info("[DEBUG]   gen_timestep_scatter_index: shape=%s values=%s",
-                    tuple(tokenizer_output.gen_timestep_scatter_index.shape),
-                    tokenizer_output.gen_timestep_scatter_index.tolist())
-            # Log sections if available
-            sections = None
-            if isinstance(tokenizer_output_dict, dict):
-                sections = tokenizer_output_dict.get("sections")
-            if sections:
-                logger.info("[DEBUG]   sections count: %d", len(sections))
-                for i, sec in enumerate(sections):
-                    sec_types = [s.get('type', '?') for s in sec if isinstance(s, dict)]
-                    logger.info("[DEBUG]     section[%d]: %d items, types=%s", i, len(sec), sec_types)
-                    # Log text content of each item in the section
-                    for j, item in enumerate(sec):
-                        if isinstance(item, dict):
-                            item_type = item.get('type', '?')
-                            if item_type == 'text':
-                                text = item.get('text', '')
-                                text_len = len(text) if isinstance(text, str) else 0
-                                uncond = item.get('uncond_enabled', None)
-                                logger.info(
-                                    "[DEBUG]       item[%d] type=text len=%d uncond=%s text=%r",
-                                    j, text_len, uncond, text[:200] if isinstance(text, str) else text,
-                                )
-                            elif item_type == 'gen_image':
-                                logger.info(
-                                    "[DEBUG]       item[%d] type=gen_image token_length=%s base_size=%s",
-                                    j, item.get('token_length', '?'), item.get('base_size', '?'),
-                                )
-                            else:
-                                logger.info("[DEBUG]       item[%d] type=%s", j, item_type)
 
         # Extract tensors from tokenizer output
         if hasattr(tokenizer_output, "tokens"):
@@ -814,31 +725,6 @@ class HunyuanImage3AR(PipelineStage):
 
         actual_batch_size = input_ids.shape[0]
         seq_len = input_ids.shape[1]
-
-        if _debug:
-            # Verify the two CFG branches have different tokens
-            if actual_batch_size >= 2:
-                branch0 = input_ids[0].cpu()
-                branch1 = input_ids[1].cpu()
-                diff_positions = (branch0 != branch1).nonzero(as_tuple=True)[0]
-                logger.info(
-                    "[DEBUG] input_ids: shape=%s, branch0 vs branch1: %d/%d tokens differ",
-                    tuple(input_ids.shape), len(diff_positions), seq_len,
-                )
-                if len(diff_positions) > 0:
-                    logger.info(
-                        "[DEBUG]   first 10 diff positions: %s",
-                        diff_positions[:10].tolist(),
-                    )
-                    for pos in diff_positions[:3]:
-                        logger.info(
-                            "[DEBUG]   pos %d: branch0=%d branch1=%d",
-                            pos.item(), branch0[pos].item(), branch1[pos].item(),
-                        )
-                else:
-                    logger.warning("[DEBUG]   WARNING: both branches have IDENTICAL tokens!")
-            else:
-                logger.warning("[DEBUG] input_ids batch_size=%d, expected 2 for CFG", actual_batch_size)
 
         # Image mask
         if hasattr(tokenizer_output, "gen_image_mask"):
@@ -855,29 +741,6 @@ class HunyuanImage3AR(PipelineStage):
             timestep_index = tokenizer_output.get("gen_timestep_scatter_index")
             if timestep_index is not None:
                 timestep_index = timestep_index.to(device)
-
-        if _debug:
-            if timestep_index is not None:
-                if timestep_index.dtype == torch.bool:
-                    n_ts_pos = timestep_index.sum(dim=-1)
-                else:
-                    n_ts_pos = torch.tensor([timestep_index.shape[1]] * timestep_index.shape[0])
-                logger.info(
-                    "[DEBUG] timestep_index: shape=%s dtype=%s marked_per_row=%s values=%s",
-                    tuple(timestep_index.shape),
-                    timestep_index.dtype,
-                    n_ts_pos.tolist(),
-                    timestep_index[:, :5].tolist() if timestep_index.shape[1] <= 5 else timestep_index[0, :3].tolist(),
-                )
-            else:
-                logger.warning("[DEBUG] timestep_index is None!")
-            if image_mask is not None:
-                n_img_pos = image_mask.sum(dim=-1)
-                logger.info(
-                    "[DEBUG] image_mask: shape=%s marked_per_row=%s",
-                    tuple(image_mask.shape),
-                    n_img_pos.tolist(),
-                )
 
         # 4. Build attention mask (4D causal + full attn at image positions)
         # Matches vllm-omni: combine joint_image_slices + gen_image_slices
@@ -935,13 +798,6 @@ class HunyuanImage3AR(PipelineStage):
             non_first_sin = non_first_sin.clone()
             non_first_cos[:, 0:1] = _ts_rope_cos
             non_first_sin[:, 0:1] = _ts_rope_sin
-            logger.info(
-                "Overrode non-first RoPE position 0 with timestep token RoPE "
-                "from first-step position %d (cos mean=%.6f, sin mean=%.6f)",
-                _ts_pos,
-                _ts_rope_cos.float().mean().item(),
-                _ts_rope_sin.float().mean().item(),
-            )
 
         # 6. Set up the diffusion scheduler
         num_inference_steps = int(
@@ -952,32 +808,6 @@ class HunyuanImage3AR(PipelineStage):
         scheduler = self._scheduler
         scheduler.set_timesteps(num_inference_steps)
         timesteps = scheduler.timesteps
-
-        # ALWAYS log this (not gated by _debug) to catch warmup/misconfig issues
-        logger.info(
-            "[DENOISING] num_inference_steps=%d  len(timesteps)=%d  is_warmup=%s  first_t=%s  last_t=%s",
-            num_inference_steps,
-            len(timesteps),
-            getattr(batch, 'is_warmup', '?'),
-            timesteps[0].item() if len(timesteps) > 0 else 'empty',
-            timesteps[-1].item() if len(timesteps) > 0 else 'empty',
-        )
-
-        if _debug:
-            logger.info(
-                "[DEBUG] scheduler: shift=%s num_steps=%d first_5_t=%s last_5_t=%s",
-                getattr(scheduler, '_shift', '?'),
-                num_inference_steps,
-                timesteps[:5].tolist(),
-                timesteps[-5:].tolist(),
-            )
-            if hasattr(scheduler, 'sigmas'):
-                sig = scheduler.sigmas
-                logger.info(
-                    "[DEBUG] scheduler sigmas: first_5=%s last_5=%s",
-                    [f"{s:.6f}" for s in sig[:5].tolist()],
-                    [f"{s:.6f}" for s in sig[-5:].tolist()],
-                )
 
         # 7. Prepare noise latents
         hf_config = self.ar_model.hf_config
@@ -1012,17 +842,8 @@ class HunyuanImage3AR(PipelineStage):
             dtype=torch.bfloat16,
         )
 
-        if _debug:
-            logger.info("[DEBUG] initial latents: %s", _tensor_stats(latents))
-            logger.info("[DEBUG] input_ids: shape=%s", tuple(input_ids.shape))
-
         # Backbone forward agent (bound to num_image_tokens for KV cache)
         backbone_fn = partial(self._backbone_forward, num_image_tokens)
-
-        # DIAGNOSTIC: parallel unconditional denoising trajectory
-        # This tells us if the model's predictions are fundamentally broken
-        # or if it's just the CFG signal that's too weak.
-        latents_uncond_only = latents.clone()
 
         # 8. Diffusion sampling loop
         for step_idx, t in enumerate(timesteps):
@@ -1042,42 +863,20 @@ class HunyuanImage3AR(PipelineStage):
                 if first_step:
                     # Embed text tokens
                     hidden_states = self.ar_model.model.get_input_embeddings(input_ids)
-                    if _debug:
-                        logger.info("[DEBUG] step%d text_emb: %s", step_idx, _tensor_stats(hidden_states))
-                        # Compare text embeddings at differing positions
-                        if actual_batch_size >= 2:
-                            diff_pos_list = (input_ids[0].cpu() != input_ids[1].cpu()).nonzero(as_tuple=True)[0]
-                            if len(diff_pos_list) > 0:
-                                emb0 = hidden_states[0, diff_pos_list].float().detach()
-                                emb1 = hidden_states[1, diff_pos_list].float().detach()
-                                diff_norm = (emb0 - emb1).norm(dim=-1)
-                                logger.info(
-                                    "[DEBUG]   text_emb at %d diff positions: "
-                                    "mean_diff_norm=%.6f max_diff_norm=%.6f",
-                                    len(diff_pos_list),
-                                    diff_norm.mean().item(),
-                                    diff_norm.max().item(),
-                                )
                     # Scatter VAE image embeddings at image positions
                     hidden_states = self._instantiate_vae_tokens_first_step(
                         hidden_states, latent_model_input, t_expand, image_mask,
                     )
-                    if _debug:
-                        logger.info("[DEBUG] step%d after_vae_scatter: %s", step_idx, _tensor_stats(hidden_states))
                     # Scatter timestep embedding
                     if timestep_index is not None:
                         hidden_states = self._instantiate_timestep_tokens(
                             hidden_states, t_expand, timestep_index,
                         )
-                    if _debug:
-                        logger.info("[DEBUG] step%d after_ts_scatter: %s", step_idx, _tensor_stats(hidden_states))
                 else:
                     # No text tokens: build from scratch
                     hidden_states = self._build_non_first_step_input(
                         t_expand, latent_model_input, actual_batch_size,
                     )
-                    if _debug and (step_idx == 0 or step_idx % 10 == 0):
-                        logger.info("[DEBUG] step%d non_first_input: %s", step_idx, _tensor_stats(hidden_states))
 
                 # Select the correct RoPE and attention mask for this step
                 if first_step:
@@ -1087,56 +886,10 @@ class HunyuanImage3AR(PipelineStage):
                     step_cos, step_sin = non_first_cos, non_first_sin
                     step_attn_mask = non_first_attention_mask
 
-                if _debug and (step_idx == 0 or step_idx % 10 == 0):
-                    logger.info("[DEBUG] step%d backbone_in: hidden=%s cos=%s", step_idx, _tensor_stats(hidden_states), _tensor_stats(step_cos))
-                    # DIAGNOSTIC: branch diff of backbone INPUT
-                    if actual_batch_size >= 2:
-                        _hs = hidden_states.float()
-                        _slen = _hs.shape[0] // 2
-                        _hin_diff = (_hs[:_slen] - _hs[_slen:2*_slen]).std().item()
-                        logger.info("[DEBUG] step%d backbone_input_branch_diff: %.6f", step_idx, _hin_diff)
-                        # Image/text breakdown
-                        if first_step and image_mask is not None:
-                            _img_mask = image_mask[0].bool().cpu()
-                            _txt_mask = ~_img_mask
-                            _hin_diff_3d = (_hs[:_slen] - _hs[_slen:2*_slen]).squeeze(0)  # [slen, hidden]
-                            if _img_mask.any():
-                                logger.info("[DEBUG]   backbone_in image_pos(%d) branch_diff: %.6f",
-                                    _img_mask.sum().item(), _hin_diff_3d[_img_mask].std().item())
-                            if _txt_mask.any():
-                                logger.info("[DEBUG]   backbone_in text_pos(%d) branch_diff: %.6f",
-                                    _txt_mask.sum().item(), _hin_diff_3d[_txt_mask].std().item())
-
                 # Run backbone
                 backbone_out = backbone_fn(
                     hidden_states, step_attn_mask, (step_cos, step_sin), first_step,
                 )
-
-                if _debug and (step_idx == 0 or step_idx % 10 == 0):
-                    logger.info("[DEBUG] step%d backbone_out: %s", step_idx, _tensor_stats(backbone_out))
-                    # Check backbone output diff between CFG branches at image vs text positions
-                    if actual_batch_size >= 2 and (step_idx == 0 or step_idx % 10 == 0):
-                        bb0 = backbone_out[0].float().detach()
-                        bb1 = backbone_out[1].float().detach()
-                        seq_len_step = bb0.shape[0]
-                        if first_step:
-                            img_mask_1d = image_mask[0].bool().cpu()
-                        else:
-                            # Non-first step: seq is [timestep_token, ...image_tokens...]
-                            # All positions except index 0 are image tokens
-                            img_mask_1d = torch.zeros(seq_len_step, dtype=torch.bool)
-                            img_mask_1d[1:] = True
-                        n_img = img_mask_1d.sum().item()
-                        if n_img > 0:
-                            img_diff = (bb0[img_mask_1d] - bb1[img_mask_1d])
-                            txt_mask_1d = ~img_mask_1d
-                            n_txt = txt_mask_1d.sum().item()
-                            txt_diff = (bb0[txt_mask_1d] - bb1[txt_mask_1d]) if n_txt > 0 else None
-                            logger.info(
-                                "[DEBUG]   backbone branch diff: image_pos(%d) std=%.6f | text_pos(%d) std=%s",
-                                n_img, img_diff.std().item(),
-                                n_txt, f"{txt_diff.std().item():.6f}" if txt_diff is not None else "N/A",
-                            )
 
                 # Extract diffusion prediction
                 pred = self._extract_diffusion_pred(
@@ -1145,42 +898,16 @@ class HunyuanImage3AR(PipelineStage):
                     num_special_tokens=seq_len - num_image_tokens,
                 )
 
-                if _debug and (step_idx == 0 or step_idx % 10 == 0):
-                    logger.info("[DEBUG] step%d pred_before_cfg: %s", step_idx, _tensor_stats(pred))
-
             pred = pred.float()
 
             # Classifier-free guidance
             if do_cfg:
                 pred_cond, pred_uncond = pred.chunk(2)
-                if _debug and (step_idx == 0 or step_idx % 10 == 0):
-                    logger.info("[DEBUG] step%d pred_cond: %s", step_idx, _tensor_stats(pred_cond))
-                    logger.info("[DEBUG] step%d pred_uncond: %s", step_idx, _tensor_stats(pred_uncond))
-                    logger.info("[DEBUG] step%d cond-uncond diff: %s", step_idx, _tensor_stats(pred_cond - pred_uncond))
                 pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
-                if _debug and (step_idx == 0 or step_idx % 10 == 0):
-                    logger.info("[DEBUG] step%d pred_after_cfg: %s", step_idx, _tensor_stats(pred))
 
             # Scheduler step (latents is always batch_size=1)
             latent_dtype = latents.dtype
             latents = scheduler.step(pred, t, latents, return_dict=False)[0].to(dtype=latent_dtype)
-
-            # DIAGNOSTIC: parallel unconditional denoising (manual Euler step)
-            if do_cfg:
-                _sigmas = scheduler.sigmas
-                _si = scheduler.step_index  # already incremented by scheduler.step()
-                if _si is not None and _si >= 1:
-                    _si_curr = _si - 1  # sigma index for THIS step
-                    if _si_curr < len(_sigmas) - 1:
-                        _dt = (_sigmas[_si_curr + 1] - _sigmas[_si_curr]).to(pred_uncond.dtype)
-                        latents_uncond_only = (latents_uncond_only + _dt * pred_uncond.to(latents_uncond_only.dtype)).to(dtype=latent_dtype)
-
-            if _debug:  # Log EVERY step (not just every 10)
-                logger.info("[DEBUG] step%d t=%.4f latents: %s", step_idx, t.item() if isinstance(t, torch.Tensor) else t, _tensor_stats(latents))
-                if do_cfg:
-                    logger.info("[DEBUG] step%d latents_uncond_only: %s", step_idx, _tensor_stats(latents_uncond_only))
-                    _guidance_signal = (pred_cond - pred_uncond)
-                    logger.info("[DEBUG] step%d guidance_signal (cond-uncond): %s", step_idx, _tensor_stats(_guidance_signal))
 
             # After first step, text tokens are no longer needed
             if first_step:
@@ -1190,16 +917,6 @@ class HunyuanImage3AR(PipelineStage):
                 # forward_block handles this via the attn_meta mechanism.
 
         # 9. Store latents for the decoding stage.
-        logger.info(
-            "[DENOISING] loop completed: %d steps executed (expected %d)",
-            step_idx + 1 if len(timesteps) > 0 else 0,
-            len(timesteps),
-        )
-        # DIAGNOSTIC: also save unconditional-only latents for comparison
-        if do_cfg and _debug:
-            batch.extra["latents_uncond_only"] = latents_uncond_only.to(torch.bfloat16).unsqueeze(2)
-            logger.info("[DEBUG] SAVED latents_uncond_only: %s (decode this to check if model works without CFG)",
-                        _tensor_stats(batch.extra["latents_uncond_only"]))
         # The denoising loop produces latents in the VAE-encoded space.
         # The decoding stage's ``scale_and_shift`` will convert them to
         # raw VAE space (``latents / scaling_factor + shift_factor``)

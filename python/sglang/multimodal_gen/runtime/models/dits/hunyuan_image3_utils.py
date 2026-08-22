@@ -30,11 +30,6 @@ import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 
-def _rope_debug_log(msg, *args):
-    if os.environ.get("HUNYUAN_DEBUG"):
-        logger.info(msg, *args)
-
-
 # =============================================================
 # 1. Custom attention meta.
 # =============================================================
@@ -173,68 +168,11 @@ class HunYuanRotary2DEmbedder:
         bs = len(attn_meta.query_lens)
         q_len = total_tokens // bs
 
-        _rope_debug_log(
-            "[RoPE] before: q=%s k=%s cos=%s sin=%s head_dim=%d cos_dim=%d branch=%s",
-            tuple(q.shape), tuple(k.shape), tuple(cos.shape), tuple(sin.shape),
-            self.head_dim, cos.shape[-1],
-            "full" if cos.shape[-1] == self.head_dim else "half->full",
-        )
-        if bs <= 2:
-            _rope_debug_log(
-                "[RoPE]   cos: mean=%.6f std=%.6f min=%.6f max=%.6f",
-                cos.float().mean().item(), cos.float().std().item(),
-                cos.float().min().item(), cos.float().max().item(),
-            )
-            _rope_debug_log(
-                "[RoPE]   sin: mean=%.6f std=%.6f min=%.6f max=%.6f",
-                sin.float().mean().item(), sin.float().std().item(),
-                sin.float().min().item(), sin.float().max().item(),
-            )
-
         # Cast to float32 for RoPE precision (matching vllm-omni)
         q = q.reshape(bs, q_len, self.num_heads, self.head_dim).transpose(1, 2).to(torch.float32)
         k = k.reshape(bs, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2).to(torch.float32)
 
-        _rope_debug_log(
-            "[RoPE]   q_pre: mean=%.6f std=%.6f | k_pre: mean=%.6f std=%.6f",
-            q.float().mean().item(), q.float().std().item(),
-            k.float().mean().item(), k.float().std().item(),
-        )
-        # Branch diff BEFORE RoPE (split along batch dim)
-        if bs >= 2:
-            _qf = q.float()
-            _sl = _qf.shape[0] // 2
-            _rope_debug_log("[RoPE]   q_pre_branch_diff: %.6f",
-                (_qf[:_sl] - _qf[_sl:2*_sl]).std().item())
-            _kf = k.float()
-            _sl = _kf.shape[0] // 2
-            _rope_debug_log("[RoPE]   k_pre_branch_diff: %.6f",
-                (_kf[:_sl] - _kf[_sl:2*_sl]).std().item())
-        # cos/sin branch diff
-        if bs >= 2 and cos.shape[0] >= 2:
-            _sl = cos.shape[0] // 2
-            _rope_debug_log("[RoPE]   cos_branch_diff: %.6f",
-                (cos[:_sl].float() - cos[_sl:2*_sl].float()).std().item())
-            _rope_debug_log("[RoPE]   sin_branch_diff: %.6f",
-                (sin[:_sl].float() - sin[_sl:2*_sl].float()).std().item())
-
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
-
-        _rope_debug_log(
-            "[RoPE]   q_post: mean=%.6f std=%.6f | k_post: mean=%.6f std=%.6f",
-            q.float().mean().item(), q.float().std().item(),
-            k.float().mean().item(), k.float().std().item(),
-        )
-        # Branch diff AFTER RoPE (split along batch dim)
-        if bs >= 2:
-            _qf = q.float()
-            _sl = _qf.shape[0] // 2
-            _rope_debug_log("[RoPE]   q_post_branch_diff: %.6f",
-                (_qf[:_sl] - _qf[_sl:2*_sl]).std().item())
-            _kf = k.float()
-            _sl = _kf.shape[0] // 2
-            _rope_debug_log("[RoPE]   k_post_branch_diff: %.6f",
-                (_kf[:_sl] - _kf[_sl:2*_sl]).std().item())
 
         q = (
             q.transpose(1, 2)
@@ -473,62 +411,33 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 # ------------------------------------------------------------------
-# Attention backend selection.
+# Attention internals logging.
 #
-# vllm-omni on NPU uses ``mindiesd.attention_forward`` (Ascend's fused
-# attention kernel) when available, falling back to F.scaled_dot_product_attention.
-# sglang must use the SAME kernel to get identical numerical results.
+# Logs input/output of EVERY call inside the attention forward pass
+# so we can compare step-by-step with vllm-omni and find the FIRST
+# line where the two frameworks diverge.
 # ------------------------------------------------------------------
-
-_mindiesd = None
-_mindiesd_probed = False
-
-
-def _get_mindiesd():
-    """Probe for mindiesd once (Ascend fused-attention library)."""
-    global _mindiesd, _mindiesd_probed
-    if not _mindiesd_probed:
-        _mindiesd_probed = True
-        try:
-            import mindiesd  # type: ignore
-            _mindiesd = mindiesd
-            logger.info("[image_attn] mindiesd available — using Ascend fused attention")
-        except ImportError:
-            logger.info("[image_attn] mindiesd NOT available — falling back to F.scaled_dot_product_attention")
-    return _mindiesd
-
 
 def _attention_forward(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
     attention_mask: torch.Tensor,
+    layer_id: int = -1,
 ) -> torch.Tensor:
-    """Attention forward using the same backend as vllm-omni.
-
-    On NPU with mindiesd installed, uses ``mindiesd.attention_forward``
-    (``fused_attn_score``, BNSD layout) — identical to vllm-omni's
-    FLASH_ATTN backend.  Otherwise falls back to
-    ``F.scaled_dot_product_attention``.
+    """Attention forward with step-by-step internals logging.
 
     All tensors in **BNSD** layout ``[batch, heads, seq_len, head_dim]``.
     ``attention_mask`` is a 4-D bool tensor ``[B, 1, Q, K]``
     (True = attend, False = mask out).
-    """
-    mindiesd = _get_mindiesd()
-    if mindiesd is not None:
-        # Use Ascend fused attention — same kernel as vllm-omni
-        output = mindiesd.attention_forward(
-            query, key, value,
-            attn_mask=attention_mask,
-            opt_mode="manual",
-            op_type="fused_attn_score",
-            layout="BNSD",
-        )
-        return output
 
-    # Fallback: PyTorch SDPA
+    When HUNYUAN_DEBUG=1, computes manual attention step-by-step in bf16
+    to expose each intermediate (QK scores, softmax, output) and compares
+    with the optimized SDPA kernel.
+    """
     scale = 1.0 / (query.shape[-1] ** 0.5)
+
+    # --- Optimized SDPA (the actual computation) ---
     output = F.scaled_dot_product_attention(
         query, key, value,
         attn_mask=attention_mask,
@@ -536,6 +445,99 @@ def _attention_forward(
         is_causal=False,
         scale=scale,
     )
+
+    # --- Attention internals diagnostics ---
+    if os.environ.get("HUNYUAN_DEBUG"):
+        try:
+            _bs, _nh, _sl, _hd = query.shape
+            _tag = f"L{layer_id}" if layer_id >= 0 else "attn"
+
+            # 1. Log INPUTS: Q, K, V
+            _qf = query.float()
+            _kf = key.float()
+            _vf = value.float()
+            _q_std = _qf.std().item()
+            _k_std = _kf.std().item()
+            _v_std = _vf.std().item()
+            # Branch diff of inputs (cond vs uncond, split along batch dim)
+            _q_bd = (_qf[:_bs//2] - _qf[_bs//2:]).std().item() if _bs >= 2 else 0.0
+            _k_bd = (_kf[:_bs//2] - _kf[_bs//2:]).std().item() if _bs >= 2 else 0.0
+            _v_bd = (_vf[:_bs//2] - _vf[_bs//2:]).std().item() if _bs >= 2 else 0.0
+            logger.info(
+                "[%s attn] INPUT  Q: std=%.6f bdiff=%.6f | K: std=%.6f bdiff=%.6f | V: std=%.6f bdiff=%.6f",
+                _tag, _q_std, _q_bd, _k_std, _k_bd, _v_std, _v_bd,
+            )
+
+            # 2. Log MASK structure
+            _am = attention_mask
+            _sample = _am[0, 0] if _am.dim() == 4 else _am[0]
+            if _sample.dim() >= 2:
+                _row0 = _sample[0].sum().item()
+                _mid = _sl // 4
+                _rowM = _sample[_mid].sum().item()
+                _last = _sample[-1].sum().item()
+                logger.info(
+                    "[%s attn] MASK   shape=%s dtype=%s | row0=%d row%d=%d rowLast=%d",
+                    _tag, tuple(_am.shape), _am.dtype, int(_row0), _mid, int(_rowM), int(_last),
+                )
+
+            # 3. Step 1: QK scores (bf16 matmul)
+            _qk = torch.matmul(_qf, _kf.transpose(-2, -1)) * scale
+            _qk_masked = _qk.clone()
+            _qk_masked.masked_fill_(~attention_mask, float('-inf'))
+            _qk_fin = _qk_masked[_qk_masked.isfinite()]
+            _qk_std_val = _qk_fin.std().item() if _qk_fin.numel() > 0 else 0.0
+            _qk_bd = 0.0
+            if _bs >= 2:
+                _qk_t = _qk_masked.transpose(1, 2).reshape(_bs * _sl, -1)
+                _qk_bd = (_qk_t[:_sl] - _qk_t[_sl:2*_sl]).std().item()
+            logger.info(
+                "[%s attn] QK     finite_std=%.6f branch_diff=%.6f",
+                _tag, _qk_std_val, _qk_bd,
+            )
+
+            # 4. Step 2: Softmax (bf16)
+            _sm = torch.softmax(_qk_masked.float(), dim=-1).to(query.dtype)
+            _sm_std = _sm.std().item()
+            _sm_bd = 0.0
+            if _bs >= 2:
+                _sm_t = _sm.transpose(1, 2).reshape(_bs * _sl, -1)
+                _sm_bd = (_sm_t[:_sl] - _sm_t[_sl:2*_sl]).std().item()
+            logger.info(
+                "[%s attn] SM     std=%.6f branch_diff=%.6f",
+                _tag, _sm_std, _sm_bd,
+            )
+
+            # 5. Step 3: Output = softmax @ V (bf16)
+            _out_manual = torch.matmul(_sm, _vf)
+            _out_std = _out_manual.std().item()
+            _out_bd = 0.0
+            if _bs >= 2:
+                _out_t = _out_manual.transpose(1, 2).reshape(_bs * _sl, -1)
+                _out_bd = (_out_t[:_sl] - _out_t[_sl:2*_sl]).std().item()
+            logger.info(
+                "[%s attn] OUT_manual: std=%.6f branch_diff=%.6f",
+                _tag, _out_std, _out_bd,
+            )
+
+            # 6. Log SDPA OUTPUT and compare with manual
+            _opt = output.float()
+            _opt_std = _opt.std().item()
+            _opt_bd = 0.0
+            if _bs >= 2:
+                _opt_t = _opt.transpose(1, 2).reshape(_bs * _sl, -1)
+                _opt_bd = (_opt_t[:_sl] - _opt_t[_sl:2*_sl]).std().item()
+            _sdpa_vs_manual = (_opt - _out_manual.float()).abs().mean().item()
+            logger.info(
+                "[%s attn] OUT_sdpa:   std=%.6f branch_diff=%.6f | SDPA_vs_manual=%.8f",
+                _tag, _opt_std, _opt_bd, _sdpa_vs_manual,
+            )
+
+        except Exception as _e:
+            import traceback
+            logger.info("[attn] DECOMP error: %s", _e)
+            logger.info("[attn] DECOMP traceback: %s", traceback.format_exc())
+
     return output
 
 
@@ -611,7 +613,7 @@ class ImageKVCacheManager:
 
         return new_key.contiguous(), new_value.contiguous()
 
-    def __call__(self, query, key, value, attn_metadata, attention_mask=None):
+    def __call__(self, query, key, value, attn_metadata, attention_mask=None, layer_id=-1):
         assert attn_metadata is not None
         self.image_token_len = attn_metadata.num_image_tokens
         first_step = attn_metadata.first_step
@@ -624,22 +626,6 @@ class ImageKVCacheManager:
         kv_head_num_per_rank = key.shape[1]
         repeat_num = head_num_per_rank // kv_head_num_per_rank
         head_dim = query.shape[2]
-
-        if os.environ.get("HUNYUAN_DEBUG") and attention_mask is not None:
-            _am = attention_mask
-            _n_img = attn_metadata.num_image_tokens
-            _txt_len = q_len - _n_img
-            _sample = _am[0, 0] if _am.dim() == 4 else _am[0]
-            _rope_debug_log(
-                "[AttnMask] shape=%s dtype=%s device=%s | "
-                "txt_row0_attend_txt=%s txt_row0_attend_img=%s | "
-                "img_row0_attend_txt=%s img_row0_attend_img=%s",
-                tuple(_am.shape), _am.dtype, _am.device,
-                _sample[0, :_txt_len].sum().item() if _sample.dim() >= 2 else "N/A",
-                _sample[0, _txt_len:].sum().item() if _sample.dim() >= 2 else "N/A",
-                _sample[_txt_len, :_txt_len].sum().item() if _sample.dim() >= 2 and _txt_len < _sample.shape[0] else "N/A",
-                _sample[_txt_len, _txt_len:].sum().item() if _sample.dim() >= 2 and _txt_len < _sample.shape[0] else "N/A",
-            )
 
         query = query.reshape(bs, q_len, head_num_per_rank, head_dim)
         key = key.reshape(bs, q_len, kv_head_num_per_rank, head_dim)
@@ -654,41 +640,7 @@ class ImageKVCacheManager:
         value = repeat_kv(value, repeat_num)
 
         attention_mask = attention_mask.contiguous()
-        attn_output = _attention_forward(query, key, value, attention_mask)
-
-        # Manual fp32 attention comparison (matches sglang attention diagnostics)
-        if os.environ.get("HUNYUAN_DEBUG"):
-            try:
-                _mq = query.float()
-                _mk = key.float()
-                _mv = value.float()
-                _sc = 1.0 / (head_dim ** 0.5)
-                # QK scores [bs, heads, sl, sl]
-                _qs = torch.matmul(_mq, _mk.transpose(-2, -1)) * _sc
-                # Apply same mask (True=attend → 0, False=mask → -inf)
-                _mask_f = (~attention_mask).float() * float('-inf')
-                _qs = _qs + _mask_f
-                _sp = torch.softmax(_qs, dim=-1)
-                _mout = torch.matmul(_sp, _mv)  # [bs, heads, sl, head_dim]
-                # Compare with optimized SDPA
-                _opt = attn_output.float()
-                _diff = (_opt - _mout).abs().mean().item()
-                _rope_debug_log("[image_attn] MANUAL_QK: max=%.4f min=%.4f std=%.4f",
-                    _qs.max().item(), _qs.min().item(), _qs.std().item())
-                _rope_debug_log("[image_attn] MANUAL_SOFTMAX: max=%.6f std=%.6f",
-                    _sp.max().item(), _sp.std().item())
-                _rope_debug_log("[image_attn] OPT_vs_MANUAL: mean_abs_diff=%.8f",
-                    _diff)
-                # Branch diff: manual vs optimized
-                _mout_t = _mout.transpose(1, 2).reshape(total_tokens, -1)
-                _opt_t = _opt.transpose(1, 2).reshape(total_tokens, -1)
-                _sl = total_tokens // bs
-                _rope_debug_log("[image_attn] MANUAL_branch_diff: %.6f",
-                    (_mout_t[:_sl] - _mout_t[_sl:2*_sl]).std().item())
-                _rope_debug_log("[image_attn] OPT_branch_diff: %.6f",
-                    (_opt_t[:_sl] - _opt_t[_sl:2*_sl]).std().item())
-            except Exception as _e:
-                _rope_debug_log("[image_attn] MANUAL error: %s", _e)
+        attn_output = _attention_forward(query, key, value, attention_mask, layer_id=layer_id)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(total_tokens, head_num_per_rank, head_dim)
