@@ -1056,6 +1056,12 @@ class HunyuanImage3AR(PipelineStage):
 
                 if _debug and (step_idx == 0 or step_idx % 10 == 0):
                     logger.info("[DEBUG] step%d backbone_in: hidden=%s cos=%s", step_idx, _tensor_stats(hidden_states), _tensor_stats(step_cos))
+                    # DIAGNOSTIC: branch diff of backbone INPUT
+                    if actual_batch_size >= 2:
+                        _hs = hidden_states.float()
+                        _slen = _hs.shape[0] // 2
+                        _hin_diff = (_hs[:_slen] - _hs[_slen:2*_slen]).std().item()
+                        logger.info("[DEBUG] step%d backbone_input_branch_diff: %.6f", step_idx, _hin_diff)
 
                 # Run backbone
                 backbone_out = backbone_fn(
