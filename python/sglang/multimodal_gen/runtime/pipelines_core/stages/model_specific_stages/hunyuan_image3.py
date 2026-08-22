@@ -1076,7 +1076,7 @@ class HunyuanImage3AR(PipelineStage):
                         if first_step and image_mask is not None:
                             _img_mask = image_mask[0].bool().cpu()
                             _txt_mask = ~_img_mask
-                            _hin_diff_3d = _hs[:_slen] - _hs[_slen:2*_slen]  # [slen, hidden]
+                            _hin_diff_3d = (_hs[:_slen] - _hs[_slen:2*_slen]).squeeze(0)  # [slen, hidden]
                             if _img_mask.any():
                                 logger.info("[DEBUG]   backbone_in image_pos(%d) branch_diff: %.6f",
                                     _img_mask.sum().item(), _hin_diff_3d[_img_mask].std().item())
