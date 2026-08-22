@@ -891,32 +891,11 @@ class HunYuanSparseMoeBlock(nn.Module):
                     self.layer_id, (_fc0 - _fc1).std().item(),
                 )
 
-        # Single all-reduce after combining all expert + shared outputs
-        if _do_moe_log:
-            _layer_debug_log(
-                "[L%d moe] tp_size=%d combined_absmean=%.6f",
-                self.layer_id, self.tp_size,
-                final_hidden_states.float().abs().mean().item(),
-            )
-        if self.tp_size > 1:
-            import os as _os
-            _skip_ar = _os.environ.get("HUNYUAN_SKIP_MOE_AR", "0") == "1"
-            if not _skip_ar:
-                # Use torch.distributed.all_reduce directly for reliable sync on NPU
-                import torch.distributed as _dist
-                from sglang.multimodal_gen.runtime.distributed.parallel_state import get_tp_group as _get_tp_group
-                _tp_group = _get_tp_group()
-                _dist.all_reduce(final_hidden_states, op=_dist.ReduceOp.SUM, group=_tp_group.device_group)
-            if _do_moe_log:
-                _slen = final_hidden_states.shape[0] // 2
-                _ar0 = final_hidden_states[:_slen].float()
-                _ar1 = final_hidden_states[_slen:2*_slen].float()
-                _layer_debug_log(
-                    "[L%d moe] after_allreduce(skip=%d): all=%.6f absmean=%.6f",
-                    self.layer_id, int(_skip_ar),
-                    (_ar0 - _ar1).std().item(),
-                    final_hidden_states.float().abs().mean().item(),
-                )
+        # NOTE: No outer all_reduce needed. The AscendTPDispatcher's finalize
+        # routing already performs all-gather across TP ranks, producing full
+        # (synced) output. The shared MLP's down_proj also has reduce_results=False.
+        # Adding an outer all_reduce here would double-count the TP reduction,
+        # amplifying branch diff by tp_size (4x with tp_size=4).
 
         return final_hidden_states.view(orig_shape)
 
