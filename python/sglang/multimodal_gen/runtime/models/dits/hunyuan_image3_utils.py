@@ -562,6 +562,22 @@ class ImageKVCacheManager:
         repeat_num = head_num_per_rank // kv_head_num_per_rank
         head_dim = query.shape[2]
 
+        if os.environ.get("HUNYUAN_DEBUG") and attention_mask is not None:
+            _am = attention_mask
+            _n_img = attn_metadata.num_image_tokens
+            _txt_len = q_len - _n_img
+            _sample = _am[0, 0] if _am.dim() == 4 else _am[0]
+            _rope_debug_log(
+                "[AttnMask] shape=%s dtype=%s device=%s | "
+                "txt_row0_attend_txt=%s txt_row0_attend_img=%s | "
+                "img_row0_attend_txt=%s img_row0_attend_img=%s",
+                tuple(_am.shape), _am.dtype, _am.device,
+                _sample[0, :_txt_len].sum().item() if _sample.dim() >= 2 else "N/A",
+                _sample[0, _txt_len:].sum().item() if _sample.dim() >= 2 else "N/A",
+                _sample[_txt_len, :_txt_len].sum().item() if _sample.dim() >= 2 and _txt_len < _sample.shape[0] else "N/A",
+                _sample[_txt_len, _txt_len:].sum().item() if _sample.dim() >= 2 and _txt_len < _sample.shape[0] else "N/A",
+            )
+
         query = query.reshape(bs, q_len, head_num_per_rank, head_dim)
         key = key.reshape(bs, q_len, kv_head_num_per_rank, head_dim)
         value = value.reshape(bs, q_len, kv_head_num_per_rank, head_dim)
@@ -575,7 +591,15 @@ class ImageKVCacheManager:
         value = repeat_kv(value, repeat_num)
 
         attention_mask = attention_mask.contiguous()
-        attn_output = _attention_forward(query, key, value, attention_mask)
+
+        # Cast to float32 for attention computation to match vllm-omni's
+        # SDPA behaviour (CUDA upcasts softmax to fp32 internally).
+        _attn_dtype = query.dtype
+        attn_output = _attention_forward(
+            query.to(torch.float32), key.to(torch.float32), value.to(torch.float32),
+            attention_mask,
+        )
+        attn_output = attn_output.to(_attn_dtype)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(total_tokens, head_num_per_rank, head_dim)
