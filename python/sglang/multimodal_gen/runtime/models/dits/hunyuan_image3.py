@@ -21,8 +21,8 @@ Ported from the official HunyuanImage-3 model repository
 (`modeling_hunyuan_image_3.py`).
 
 Uses multimodal_gen layers for TP parallelism, attention, RoPE and
-embeddings. The MoE block uses primitive per-expert MLPs (no srt
-dependency) for portability.
+embeddings. The MoE block uses SRT FusedMoE for efficient fused expert
+computation.
 """
 
 import math
@@ -45,8 +45,8 @@ def _layer_debug_log(msg, *args):
     if os.environ.get("HUNYUAN_DEBUG"):
         logger.info(msg, *args)
 
-# MoE uses primitive per-expert HunYuanMLP modules (no srt dependency).
-
+from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
+from sglang.srt.layers.moe.topk import TopK
 from sglang.multimodal_gen.runtime.distributed import (
     get_tp_world_size,
     tensor_model_parallel_all_reduce,
@@ -723,12 +723,11 @@ class HunYuanCrossAttention(nn.Module):
 
 
 class HunYuanSparseMoeBlock(nn.Module):
-    """Sparse MoE block with primitive per-expert MLPs (no srt dependency).
+    """Sparse MoE block using FusedMoE for efficient fused expert computation.
 
-    Uses softmax gating + top-k selection + individual HunYuanMLP experts.
-    Each expert is a standard HunYuanMLP with TP-sharded gate_up_proj and
-    down_proj. A single all-reduce is performed after combining all expert
-    outputs (and the shared MLP contribution).
+    Uses TopK gating + FusedMoE experts.  A separate shared MLP (when
+    present) is always applied to all tokens.  A single all-reduce is
+    performed after combining all expert and shared outputs.
     """
 
     def __init__(
@@ -738,6 +737,7 @@ class HunYuanSparseMoeBlock(nn.Module):
         super().__init__()
         assert layer_id >= 0
         self.tp_size = get_tp_world_size()
+        self.hidden_size = config.hidden_size
         self.n_routed_experts = config.num_experts
 
         top_k = _get_layer_value(config, "moe_topk", layer_id)
@@ -750,23 +750,24 @@ class HunYuanSparseMoeBlock(nn.Module):
             quant_config=None, prefix=f"{prefix}.gate",
         )
 
-        # Primitive per-expert MLPs (each is a TP-sharded HunYuanMLP).
-        self.experts = nn.ModuleList()
-        for expert_id in range(self.n_routed_experts):
-            self.experts.append(
-                HunYuanMLP(
-                    hidden_size=config.hidden_size,
-                    intermediate_size=intermediate_size,
-                    hidden_act=config.hidden_act,
-                    quant_config=quant_config,
-                    bias=getattr(config, "mlp_bias", False),
-                    prefix=f"{prefix}.experts.{expert_id}",
-                    reduce_results=False,  # single all-reduce at MoE block level
-                )
-            )
+        self.topk = TopK(
+            top_k=top_k,
+            renormalize=getattr(config, "norm_topk_prob", top_k > 1),
+            scoring_func="softmax",
+            layer_id=layer_id,
+        )
 
-        self.top_k = top_k
-        self.renormalize = getattr(config, "norm_topk_prob", top_k > 1)
+        self.experts = FusedMoE(
+            num_experts=config.num_experts,
+            top_k=top_k,
+            hidden_size=config.hidden_size,
+            intermediate_size=intermediate_size,
+            reduce_results=False,
+            quant_config=quant_config,
+            layer_id=layer_id,
+            prefix=f"{prefix}.experts",
+            with_bias=getattr(config, "mlp_bias", False),
+        )
 
         if getattr(config, "use_mixed_mlp_moe", 0) > 0:
             num_shared_expert = _get_layer_value(config, "num_shared_expert", layer_id)
@@ -791,24 +792,11 @@ class HunYuanSparseMoeBlock(nn.Module):
         # Router logits: [num_tokens, num_experts]
         router_logits, _ = self.gate(hidden_states)
 
-        # Top-k expert selection with softmax gating
-        routing_weights = F.softmax(router_logits, dim=-1)
-        topk_weights, topk_indices = torch.topk(
-            routing_weights, self.top_k, dim=-1
-        )
-        # Renormalize top-k weights
-        if self.renormalize:
-            topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-8)
+        # TopK routing
+        topk_output = self.topk(hidden_states, router_logits)
 
-        # Compute weighted sum of expert outputs
-        final_hidden_states = torch.zeros_like(hidden_states)
-        for i, expert in enumerate(self.experts):
-            expert_mask = (topk_indices == i).any(dim=-1)  # [num_tokens]
-            if not expert_mask.any():
-                continue
-            token_weights = topk_weights[expert_mask, (topk_indices[expert_mask] == i).int().argmax(dim=-1)]
-            expert_output = expert(hidden_states[expert_mask])
-            final_hidden_states[expert_mask] += token_weights.unsqueeze(-1) * expert_output
+        # Fused expert computation
+        final_hidden_states = self.experts(hidden_states, topk_output)
 
         # Shared MLP contribution (always applied to all tokens)
         if self.shared_mlp is not None:
@@ -1189,22 +1177,18 @@ class HunyuanImage3ForCausalMM(CachableDiT):
 
         cla_factor = _get_cla_factor(self.hf_config)
 
-        expert_fused_mapping = []
-        expert_down_mapping = []
+        expert_params_mapping = []
         if _is_moe(self.hf_config):
             num_experts = self.hf_config.num_experts
-            # Checkpoint stores fused gate_and_up_proj for each expert.
-            # MergedColumnParallelLinear.weight_loader(param, weight) with
-            # no shard_id handles the internal split automatically.
-            expert_fused_mapping = [
-                (f"experts.{eid}.gate_up_proj", f"experts.{eid}.gate_and_up_proj")
-                for eid in range(num_experts)
-            ]
-            # Direct mapping for per-expert down_proj
-            expert_down_mapping = [
-                (f"experts.{eid}.down_proj", f"experts.{eid}.down_proj")
-                for eid in range(num_experts)
-            ]
+            # FusedMoE stores fused gate+up as w13_weight and down as w2_weight.
+            # make_expert_params_mapping generates per-expert mappings for
+            # separate gate_proj/up_proj/down_proj checkpoint names.
+            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=num_experts,
+            )
 
         params_dict = dict(self.named_parameters())
         loaded_params: set = set()
@@ -1288,38 +1272,61 @@ class HunyuanImage3ForCausalMM(CachableDiT):
             if is_found:
                 continue
 
-            # Expert fused gate_and_up_proj → gate_up_proj (loaded without shard_id;
-            # MergedColumnParallelLinear splits internally)
+            # Expert weights: FusedMoE param mapping (w13/w2)
+            # Also handles fused gate_and_up_proj by splitting into gate/up halves.
             is_found = False
-            for param_name, weight_name in expert_fused_mapping:
+            for mapping in expert_params_mapping:
+                param_name, weight_name, expert_id, shard_id = mapping
                 if weight_name not in name:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
+                if name_mapped.endswith(".bias") and name_mapped not in params_dict:
+                    continue
                 if name_mapped not in params_dict:
                     continue
                 param = params_dict[name_mapped]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight)
+                weight_loader(
+                    param, loaded_weight,
+                    name_mapped, shard_id=shard_id, expert_id=expert_id,
+                )
                 loaded_params.add(name_mapped)
                 is_found = True
                 break
             if is_found:
                 continue
 
-            # Expert down_proj (direct)
+            # Expert fused gate_and_up_proj → split into gate_proj (w1) + up_proj (w3)
+            # Checkpoint stores fused gate_and_up_proj per expert; FusedMoE
+            # weight_loader requires separate w1/w3 shard loading.
             is_found = False
-            for param_name, weight_name in expert_down_mapping:
-                if weight_name not in name:
-                    continue
-                name_mapped = name.replace(weight_name, param_name)
-                if name_mapped not in params_dict:
-                    continue
-                param = params_dict[name_mapped]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight)
-                loaded_params.add(name_mapped)
-                is_found = True
-                break
+            if _is_moe(self.hf_config) and "mlp.experts" in name and "gate_and_up_proj" in name:
+                # Find the matching expert id from the checkpoint name
+                m = re.search(r"experts\.(\d+)\.gate_and_up_proj", name)
+                if m is not None:
+                    expert_id = int(m.group(1))
+                    # Split fused weight into gate and up halves
+                    fused_weight = loaded_weight
+                    half = fused_weight.shape[0] // 2
+                    gate_weight = fused_weight[:half]
+                    up_weight = fused_weight[half:]
+
+                    w13_param_name = name.replace(
+                        f"experts.{expert_id}.gate_and_up_proj", "experts.w13_weight"
+                    )
+                    if w13_param_name in params_dict:
+                        param = params_dict[w13_param_name]
+                        weight_loader = param.weight_loader
+                        weight_loader(
+                            param, gate_weight,
+                            w13_param_name, shard_id="w1", expert_id=expert_id,
+                        )
+                        weight_loader(
+                            param, up_weight,
+                            w13_param_name, shard_id="w3", expert_id=expert_id,
+                        )
+                        loaded_params.add(w13_param_name)
+                        is_found = True
             if is_found:
                 continue
 
