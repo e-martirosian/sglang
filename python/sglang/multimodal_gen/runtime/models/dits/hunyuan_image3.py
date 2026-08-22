@@ -829,6 +829,19 @@ class HunYuanSparseMoeBlock(nn.Module):
             with_bias=getattr(config, "mlp_bias", False),
         )
 
+        # CRITICAL DIAGNOSTIC: log TP config to verify MoE TP synchronization
+        logger.info(
+            "[MOE_CONFIG] layer=%d  moe_tp_size=%d  moe_ep_size=%d  "
+            "reduce_results=False  hidden_size=%d  intermediate_size=%d  "
+            "experts_intermediate_size_per_partition=%d",
+            layer_id,
+            self.experts.moe_tp_size,
+            self.experts.moe_ep_size,
+            config.hidden_size,
+            intermediate_size,
+            self.experts.intermediate_size_per_partition,
+        )
+
     def forward(self, hidden_states):
         orig_shape = hidden_states.shape
         hidden_dim = hidden_states.shape[-1]

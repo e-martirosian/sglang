@@ -930,6 +930,16 @@ class HunyuanImage3AR(PipelineStage):
         scheduler.set_timesteps(num_inference_steps)
         timesteps = scheduler.timesteps
 
+        # ALWAYS log this (not gated by _debug) to catch warmup/misconfig issues
+        logger.info(
+            "[DENOISING] num_inference_steps=%d  len(timesteps)=%d  is_warmup=%s  first_t=%s  last_t=%s",
+            num_inference_steps,
+            len(timesteps),
+            getattr(batch, 'is_warmup', '?'),
+            timesteps[0].item() if len(timesteps) > 0 else 'empty',
+            timesteps[-1].item() if len(timesteps) > 0 else 'empty',
+        )
+
         if _debug:
             logger.info(
                 "[DEBUG] scheduler: shift=%s num_steps=%d first_5_t=%s last_5_t=%s",
@@ -1146,6 +1156,11 @@ class HunyuanImage3AR(PipelineStage):
                 # forward_block handles this via the attn_meta mechanism.
 
         # 9. Store latents for the decoding stage.
+        logger.info(
+            "[DENOISING] loop completed: %d steps executed (expected %d)",
+            step_idx + 1 if len(timesteps) > 0 else 0,
+            len(timesteps),
+        )
         # DIAGNOSTIC: also save unconditional-only latents for comparison
         if do_cfg and _debug:
             batch.extra["latents_uncond_only"] = latents_uncond_only.to(torch.bfloat16).unsqueeze(2)
