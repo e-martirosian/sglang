@@ -159,6 +159,12 @@ def _sync_srt_tp_group() -> None:
 
     if srt_parallel_state._TP is None:
         srt_parallel_state._TP = _TP
+    # Sync MOE EP/TP groups so SRT's FusedMoE can work.
+    # In multimodal_gen, expert parallelism follows TP (no separate EP).
+    if srt_parallel_state._MOE_EP is None:
+        srt_parallel_state._MOE_EP = _TP
+    if srt_parallel_state._MOE_TP is None:
+        srt_parallel_state._MOE_TP = _TP
 
 
 def _clear_srt_tp_group() -> None:
@@ -166,6 +172,10 @@ def _clear_srt_tp_group() -> None:
 
     if srt_parallel_state._TP is _TP:
         srt_parallel_state._TP = None
+    if srt_parallel_state._MOE_EP is _TP:
+        srt_parallel_state._MOE_EP = None
+    if srt_parallel_state._MOE_TP is _TP:
+        srt_parallel_state._MOE_TP = None
 
 
 def init_parallel_group_coordinator(

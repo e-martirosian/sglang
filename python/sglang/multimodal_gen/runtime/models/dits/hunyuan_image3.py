@@ -21,7 +21,7 @@ Ported from the official HunyuanImage-3 model repository
 (`modeling_hunyuan_image_3.py`).
 
 Uses multimodal_gen layers for TP parallelism, attention, RoPE and
-embeddings. The MoE block uses fused_experts triton kernel for efficient fused expert
+embeddings. The MoE block uses SRT FusedMoE for efficient fused expert
 computation.
 """
 
@@ -45,11 +45,8 @@ def _layer_debug_log(msg, *args):
     if os.environ.get("HUNYUAN_DEBUG"):
         logger.info(msg, *args)
 
-from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
-from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import fused_experts
-from sglang.srt.layers.moe.topk import StandardTopKOutput
+from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.multimodal_gen.runtime.distributed import (
-    get_tp_rank,
     get_tp_world_size,
     tensor_model_parallel_all_reduce,
 )
@@ -724,33 +721,11 @@ class HunYuanCrossAttention(nn.Module):
         return output, (ori_k, v)
 
 
-class _GroupedExperts(nn.Module):
-    """Packed expert weight tensors for fused_experts (no SRT runtime deps).
-
-    Stores w13_weight (gate+up fused) and w2_weight (down) as packed tensors
-    compatible with sglang's fused_experts triton kernel.
-    intermediate_size here is the **per-partition** size (already divided by tp_size).
-    """
-
-    def __init__(self, num_experts: int, hidden_size: int, intermediate_size_per_partition: int):
-        super().__init__()
-        self.num_experts = num_experts
-        self.w13_weight = nn.Parameter(
-            torch.empty(num_experts, 2 * intermediate_size_per_partition, hidden_size)
-        )
-        self.w2_weight = nn.Parameter(
-            torch.empty(num_experts, hidden_size, intermediate_size_per_partition)
-        )
-
-
 class HunYuanSparseMoeBlock(nn.Module):
-    """Sparse MoE block using fused_experts triton kernel.
+    """Sparse MoE block using SRT FusedMoE (matching vllm-omni reference).
 
-    Uses softmax gating + top-k selection + fused_experts for efficient
-    expert computation.  Packed weight tensors (w13/w2) are consumed
-    directly by the triton kernel without requiring SRT runtime state.
+    FusedMoE handles routing + fused expert computation internally.
     A separate shared MLP (when present) is always applied to all tokens.
-    A single all-reduce is performed after combining all outputs.
     """
 
     def __init__(
@@ -760,7 +735,6 @@ class HunYuanSparseMoeBlock(nn.Module):
         super().__init__()
         assert layer_id >= 0
         self.tp_size = get_tp_world_size()
-        self.hidden_size = config.hidden_size
         self.n_routed_experts = config.num_experts
 
         top_k = _get_layer_value(config, "moe_topk", layer_id)
@@ -768,35 +742,9 @@ class HunYuanSparseMoeBlock(nn.Module):
         if getattr(config, "moe_intermediate_size", None) is not None:
             intermediate_size = _get_layer_value(config, "moe_intermediate_size", layer_id)
 
-        intermediate_size_per_partition = intermediate_size // self.tp_size
-        self.intermediate_size = intermediate_size
-        self.top_k = top_k
-        self.renormalize = getattr(config, "norm_topk_prob", top_k > 1)
-
         self.gate = ReplicatedLinear(
             config.hidden_size, config.num_experts, bias=False,
             quant_config=None, prefix=f"{prefix}.gate",
-        )
-
-        # Packed expert weights (no SRT runtime dependency)
-        self.experts = _GroupedExperts(
-            num_experts=config.num_experts,
-            hidden_size=config.hidden_size,
-            intermediate_size_per_partition=intermediate_size_per_partition,
-        )
-
-        self._moe_runner_config = MoeRunnerConfig(
-            num_experts=config.num_experts,
-            num_local_experts=config.num_experts,
-            hidden_size=config.hidden_size,
-            intermediate_size_per_partition=intermediate_size_per_partition,
-            top_k=top_k,
-            activation="silu",
-            is_gated=True,
-            inplace=False,
-            apply_router_weight_on_input=False,
-            routed_scaling_factor=None,
-            gate_up_interleaved=False,
         )
 
         if getattr(config, "use_mixed_mlp_moe", 0) > 0:
@@ -814,6 +762,18 @@ class HunYuanSparseMoeBlock(nn.Module):
         else:
             self.shared_mlp = None
 
+        self.experts = FusedMoE(
+            num_experts=config.num_experts,
+            top_k=top_k,
+            hidden_size=config.hidden_size,
+            intermediate_size=intermediate_size,
+            reduce_results=False,
+            quant_config=quant_config,
+            layer_id=layer_id,
+            prefix=f"{prefix}.experts",
+            with_bias=getattr(config, "mlp_bias", False),
+        )
+
     def forward(self, hidden_states):
         orig_shape = hidden_states.shape
         hidden_dim = hidden_states.shape[-1]
@@ -822,26 +782,10 @@ class HunYuanSparseMoeBlock(nn.Module):
         # Router logits: [num_tokens, num_experts]
         router_logits, _ = self.gate(hidden_states)
 
-        # Top-k expert selection with softmax gating
-        routing_weights = F.softmax(router_logits, dim=-1)
-        topk_weights, topk_indices = torch.topk(
-            routing_weights, self.top_k, dim=-1
-        )
-        if self.renormalize:
-            topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-8)
-
-        # Fused expert computation via triton kernel
-        topk_output = StandardTopKOutput(
-            topk_weights=topk_weights.float(),
-            topk_ids=topk_indices.to(torch.int32),
-            router_logits=torch.empty(0, device=hidden_states.device),
-        )
-        final_hidden_states = fused_experts(
-            hidden_states.contiguous(),
-            self.experts.w13_weight,
-            self.experts.w2_weight,
-            topk_output,
-            self._moe_runner_config,
+        # FusedMoE handles routing + expert computation internally
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
         )
 
         # Shared MLP contribution (always applied to all tokens)
@@ -1223,6 +1167,16 @@ class HunyuanImage3ForCausalMM(CachableDiT):
 
         cla_factor = _get_cla_factor(self.hf_config)
 
+        # Expert params mapping for FusedMoE weight_loader
+        expert_params_mapping = []
+        if _is_moe(self.hf_config):
+            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.hf_config.num_experts,
+            )
+
         params_dict = dict(self.named_parameters())
         loaded_params: set = set()
         _ckpt_dtype_logged = False
@@ -1305,81 +1259,65 @@ class HunyuanImage3ForCausalMM(CachableDiT):
             if is_found:
                 continue
 
-            # Expert weights: packed w13_weight / w2_weight with TP sharding.
+            # Expert weights: use FusedMoE weight_loader which handles TP sharding.
             # Checkpoint may store per-expert weights as:
-            #   (a) fused gate_and_up_proj, or (b) separate gate_proj / up_proj.
-            # We shard along the intermediate dimension for TP.
+            #   (a) separate gate_proj / up_proj / down_proj, or
+            #   (b) fused gate_and_up_proj + down_proj.
             is_found = False
             if _is_moe(self.hf_config) and "mlp.experts" in name:
-                # --- fused gate_and_up_proj format ---
+                # Check for fused gate_and_up_proj format
                 m_fused = re.search(r"experts\.(\d+)\.gate_and_up_proj", name)
-                # --- separate gate_proj / up_proj format ---
-                m_gate = re.search(r"experts\.(\d+)\.gate_proj", name)
-                m_up = re.search(r"experts\.(\d+)\.up_proj", name)
-                m_down = re.search(r"experts\.(\d+)\.down_proj", name)
-                tp_rank = get_tp_rank()
-
                 if m_fused is not None:
+                    # Split fused weight into gate/up halves and load separately
                     expert_id = int(m_fused.group(1))
                     fused_weight = loaded_weight
-                    full_intermediate = fused_weight.shape[0] // 2
-                    per_partition = full_intermediate // get_tp_world_size()
-                    gate_full = fused_weight[:full_intermediate]
-                    up_full = fused_weight[full_intermediate:]
-                    gate_shard = gate_full[tp_rank * per_partition:(tp_rank + 1) * per_partition]
-                    up_shard = up_full[tp_rank * per_partition:(tp_rank + 1) * per_partition]
-                    w13_shard = torch.cat([gate_shard, up_shard], dim=0)
+                    half = fused_weight.shape[0] // 2
+                    gate_weight = fused_weight[:half]
+                    up_weight = fused_weight[half:]
 
-                    w13_param_name = name.replace(
-                        f"experts.{expert_id}.gate_and_up_proj", "experts.w13_weight"
-                    )
-                    if w13_param_name in params_dict:
-                        params_dict[w13_param_name].data[expert_id].copy_(w13_shard)
-                        loaded_params.add(w13_param_name)
+                    for mapping in expert_params_mapping:
+                        param_name, weight_name, eid, shard_id = mapping
+                        if eid != expert_id:
+                            continue
+                        name_mapped = name.replace(
+                            f"experts.{expert_id}.gate_and_up_proj", param_name
+                        )
+                        if name_mapped not in params_dict:
+                            continue
+                        param = params_dict[name_mapped]
+                        # gate_proj → first half, up_proj → second half
+                        if "gate_proj" in weight_name:
+                            w = gate_weight
+                        elif "up_proj" in weight_name:
+                            w = up_weight
+                        else:
+                            continue
+                        param.weight_loader(
+                            param, w, name_mapped,
+                            shard_id=shard_id, expert_id=eid,
+                        )
+                        loaded_params.add(name_mapped)
                     is_found = True
-                elif m_gate is not None:
-                    expert_id = int(m_gate.group(1))
-                    full_intermediate = loaded_weight.shape[0]
-                    per_partition = full_intermediate // get_tp_world_size()
-                    gate_shard = loaded_weight[tp_rank * per_partition:(tp_rank + 1) * per_partition]
-
-                    w13_param_name = name.replace(
-                        f"experts.{expert_id}.gate_proj", "experts.w13_weight"
-                    )
-                    if w13_param_name in params_dict:
-                        param = params_dict[w13_param_name]
-                        half = param.shape[1] // 2
-                        param.data[expert_id, :half].copy_(gate_shard)
-                        loaded_params.add(w13_param_name)
-                    is_found = True
-                elif m_up is not None:
-                    expert_id = int(m_up.group(1))
-                    full_intermediate = loaded_weight.shape[0]
-                    per_partition = full_intermediate // get_tp_world_size()
-                    up_shard = loaded_weight[tp_rank * per_partition:(tp_rank + 1) * per_partition]
-
-                    w13_param_name = name.replace(
-                        f"experts.{expert_id}.up_proj", "experts.w13_weight"
-                    )
-                    if w13_param_name in params_dict:
-                        param = params_dict[w13_param_name]
-                        half = param.shape[1] // 2
-                        param.data[expert_id, half:].copy_(up_shard)
-                        loaded_params.add(w13_param_name)
-                    is_found = True
-                elif m_down is not None:
-                    expert_id = int(m_down.group(1))
-                    full_intermediate = loaded_weight.shape[-1]
-                    per_partition = full_intermediate // get_tp_world_size()
-                    w2_shard = loaded_weight[:, tp_rank * per_partition:(tp_rank + 1) * per_partition]
-
-                    w2_param_name = name.replace(
-                        f"experts.{expert_id}.down_proj", "experts.w2_weight"
-                    )
-                    if w2_param_name in params_dict:
-                        params_dict[w2_param_name].data[expert_id].copy_(w2_shard)
-                        loaded_params.add(w2_param_name)
-                    is_found = True
+                else:
+                    # Separate gate_proj / up_proj / down_proj format
+                    for mapping in expert_params_mapping:
+                        param_name, weight_name, expert_id, shard_id = mapping
+                        if weight_name not in name:
+                            continue
+                        name_mapped = name.replace(weight_name, param_name)
+                        if name_mapped.endswith(".bias") and name_mapped not in params_dict:
+                            continue
+                        if name_mapped not in params_dict:
+                            continue
+                        param = params_dict[name_mapped]
+                        weight_loader = param.weight_loader
+                        weight_loader(
+                            param, loaded_weight, name_mapped,
+                            shard_id=shard_id, expert_id=expert_id,
+                        )
+                        loaded_params.add(name_mapped)
+                        is_found = True
+                        break
             if is_found:
                 continue
 
