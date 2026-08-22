@@ -1023,6 +1023,8 @@ class HunyuanImage3DecoderLayer(nn.Module):
                     self.layer_id, hidden_states.float().std().item(),
                 )
                 _log_branch_diff(hidden_states, residual, 2, self._num_img_log, "after_post_attn_ln", self.layer_id)
+                # Also log raw post_attn_ln diff (without residual)
+                _log_branch_diff(hidden_states, None, 2, self._num_img_log, "after_post_attn_ln_raw", self.layer_id)
             hidden_states = self.mlp(hidden_states)
             if _do_log:
                 # Sync before measuring to ensure any async all_reduce completes
@@ -1037,6 +1039,8 @@ class HunyuanImage3DecoderLayer(nn.Module):
                     hidden_states.float().abs().mean().item(),
                 )
                 _log_branch_diff(hidden_states, residual, 2, self._num_img_log, "after_mlp", self.layer_id)
+                # Also log raw MLP output diff (without residual) for comparison with MoE block
+                _log_branch_diff(hidden_states, None, 2, self._num_img_log, "after_mlp_raw", self.layer_id)
             hidden_states = residual + hidden_states
             if _do_log:
                 _layer_debug_log(
