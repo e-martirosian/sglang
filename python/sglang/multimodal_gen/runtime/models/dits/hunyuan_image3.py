@@ -812,7 +812,7 @@ class HunYuanSparseMoeBlock(nn.Module):
                 quant_config=quant_config,
                 bias=getattr(config, "mlp_bias", False),
                 prefix=f"{prefix}.shared_mlp",
-                reduce_results=False,
+                reduce_results=True,
             )
         else:
             self.shared_mlp = None
