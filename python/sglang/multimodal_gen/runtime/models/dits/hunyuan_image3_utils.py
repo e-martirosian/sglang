@@ -473,9 +473,30 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 # ------------------------------------------------------------------
-# Attention: uses F.scaled_dot_product_attention to match vllm-omni's
-# SDPA backend exactly.  Works on any device (NPU, CUDA, CPU).
+# Attention backend selection.
+#
+# vllm-omni on NPU uses ``mindiesd.attention_forward`` (Ascend's fused
+# attention kernel) when available, falling back to F.scaled_dot_product_attention.
+# sglang must use the SAME kernel to get identical numerical results.
 # ------------------------------------------------------------------
+
+_mindiesd = None
+_mindiesd_probed = False
+
+
+def _get_mindiesd():
+    """Probe for mindiesd once (Ascend fused-attention library)."""
+    global _mindiesd, _mindiesd_probed
+    if not _mindiesd_probed:
+        _mindiesd_probed = True
+        try:
+            import mindiesd  # type: ignore
+            _mindiesd = mindiesd
+            logger.info("[image_attn] mindiesd available — using Ascend fused attention")
+        except ImportError:
+            logger.info("[image_attn] mindiesd NOT available — falling back to F.scaled_dot_product_attention")
+    return _mindiesd
+
 
 def _attention_forward(
     query: torch.Tensor,
@@ -483,16 +504,31 @@ def _attention_forward(
     value: torch.Tensor,
     attention_mask: torch.Tensor,
 ) -> torch.Tensor:
-    """Scaled dot-product attention matching vllm-omni's SDPA path.
+    """Attention forward using the same backend as vllm-omni.
+
+    On NPU with mindiesd installed, uses ``mindiesd.attention_forward``
+    (``fused_attn_score``, BNSD layout) — identical to vllm-omni's
+    FLASH_ATTN backend.  Otherwise falls back to
+    ``F.scaled_dot_product_attention``.
 
     All tensors in **BNSD** layout ``[batch, heads, seq_len, head_dim]``.
     ``attention_mask`` is a 4-D bool tensor ``[B, 1, Q, K]``
     (True = attend, False = mask out).
     """
+    mindiesd = _get_mindiesd()
+    if mindiesd is not None:
+        # Use Ascend fused attention — same kernel as vllm-omni
+        output = mindiesd.attention_forward(
+            query, key, value,
+            attn_mask=attention_mask,
+            opt_mode="manual",
+            op_type="fused_attn_score",
+            layout="BNSD",
+        )
+        return output
+
+    # Fallback: PyTorch SDPA
     scale = 1.0 / (query.shape[-1] ** 0.5)
-    # F.scaled_dot_product_attention selects the best available kernel
-    # (flash, memory-efficient, or math) and handles the bool mask
-    # internally — identical to vllm-omni's SDPAImpl._forward_impl.
     output = F.scaled_dot_product_attention(
         query, key, value,
         attn_mask=attention_mask,
