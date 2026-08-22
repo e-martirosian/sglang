@@ -158,11 +158,12 @@ def _build_causal_attention_mask(
     seq_len: int,
     image_slices: list[list[slice]],
     device: torch.device,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, list[list[tuple[int, int]]]]:
     """Build 4D causal attention mask with full attention at image positions.
 
-    Matches vllm-omni's ``_prepare_attention_mask_for_generation`` which uses
-    the same causal + bidirectional-image-block pattern.
+    Matches vllm-omni's ``_prepare_attention_mask_for_generation`` exactly:
+    per-batch mask rows, combined joint + gen image slices, and
+    ``full_attn_spans`` tracking for downstream use.
 
     Args:
         batch_size: batch size (may be doubled for CFG).
@@ -170,14 +171,28 @@ def _build_causal_attention_mask(
         image_slices: per-batch list of slice objects marking image token
             positions that should use full (non-causal) attention.
         device: target device.
+
+    Returns:
+        ``(attention_mask, full_attn_spans)`` where *attention_mask* has shape
+        ``[batch_size, 1, seq_len, seq_len]`` and *full_attn_spans* is a
+        per-batch list of ``(start, stop)`` tuples for image regions.
     """
-    # Causal (lower-triangular) mask
-    mask = torch.ones(seq_len, seq_len, dtype=torch.bool, device=device).tril(0)
-    # Enable full attention at image positions (matches vllm-omni)
-    for slices in image_slices:
-        for s in slices:
-            mask[s, s] = True
-    return mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, -1, -1).contiguous()
+    # Causal (lower-triangular) mask — per-batch rows (matches vllm-omni)
+    mask = torch.ones(seq_len, seq_len, dtype=torch.bool, device=device).tril(0).repeat(batch_size, 1, 1)
+
+    full_attn_spans: list[list[tuple[int, int]]] = [[] for _ in range(batch_size)]
+    for i in range(batch_size):
+        for image_slice in image_slices[i]:
+            mask[i, image_slice, image_slice] = True
+            start = image_slice.start if image_slice.start is not None else 0
+            stop = image_slice.stop if image_slice.stop is not None else seq_len
+            assert start < stop, f"Invalid image slice: {image_slice}"
+            full_attn_spans[i].append((int(start), int(stop)))
+        if full_attn_spans[i]:
+            full_attn_spans[i].sort(key=lambda x: x[0])
+
+    mask = mask.unsqueeze(1)  # [batch_size, 1, seq_len, seq_len]
+    return mask, full_attn_spans
 
 
 def _build_rope_image_info(
@@ -865,10 +880,15 @@ class HunyuanImage3AR(PipelineStage):
                 )
 
         # 4. Build attention mask (4D causal + full attn at image positions)
-        image_slices = getattr(tokenizer_output, "gen_image_slices", [[] for _ in range(actual_batch_size)])
-        if not isinstance(image_slices[0], list):
-            image_slices = [image_slices]
-        attention_mask = _build_causal_attention_mask(
+        # Matches vllm-omni: combine joint_image_slices + gen_image_slices
+        gen_slices = getattr(tokenizer_output, "gen_image_slices", [[] for _ in range(actual_batch_size)])
+        joint_slices = getattr(tokenizer_output, "joint_image_slices", [[] for _ in range(actual_batch_size)])
+        if not isinstance(gen_slices[0], list):
+            gen_slices = [gen_slices]
+        if not isinstance(joint_slices[0], list):
+            joint_slices = [joint_slices]
+        image_slices = [joint_slices[i] + gen_slices[i] for i in range(actual_batch_size)]
+        attention_mask, full_attn_spans = _build_causal_attention_mask(
             actual_batch_size, seq_len, image_slices, device
         )
 
@@ -878,7 +898,7 @@ class HunyuanImage3AR(PipelineStage):
             [slice(1, non_first_seq_len)]
             for _ in range(actual_batch_size)
         ]
-        non_first_attention_mask = _build_causal_attention_mask(
+        non_first_attention_mask, _ = _build_causal_attention_mask(
             actual_batch_size, non_first_seq_len, non_first_image_slices, device
         )
 
