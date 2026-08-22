@@ -1306,14 +1306,21 @@ class HunyuanImage3ForCausalMM(CachableDiT):
                 continue
 
             # Expert weights: packed w13_weight / w2_weight with TP sharding.
-            # Checkpoint stores per-expert fused gate_and_up_proj and down_proj.
+            # Checkpoint may store per-expert weights as:
+            #   (a) fused gate_and_up_proj, or (b) separate gate_proj / up_proj.
             # We shard along the intermediate dimension for TP.
             is_found = False
-            if _is_moe(self.hf_config) and "mlp.experts" in name and "gate_and_up_proj" in name:
-                m = re.search(r"experts\.(\d+)\.gate_and_up_proj", name)
-                if m is not None:
-                    expert_id = int(m.group(1))
-                    tp_rank = get_tp_rank()
+            if _is_moe(self.hf_config) and "mlp.experts" in name:
+                # --- fused gate_and_up_proj format ---
+                m_fused = re.search(r"experts\.(\d+)\.gate_and_up_proj", name)
+                # --- separate gate_proj / up_proj format ---
+                m_gate = re.search(r"experts\.(\d+)\.gate_proj", name)
+                m_up = re.search(r"experts\.(\d+)\.up_proj", name)
+                m_down = re.search(r"experts\.(\d+)\.down_proj", name)
+                tp_rank = get_tp_rank()
+
+                if m_fused is not None:
+                    expert_id = int(m_fused.group(1))
                     fused_weight = loaded_weight
                     full_intermediate = fused_weight.shape[0] // 2
                     per_partition = full_intermediate // get_tp_world_size()
@@ -1330,11 +1337,38 @@ class HunyuanImage3ForCausalMM(CachableDiT):
                         params_dict[w13_param_name].data[expert_id].copy_(w13_shard)
                         loaded_params.add(w13_param_name)
                     is_found = True
-            if not is_found and _is_moe(self.hf_config) and "mlp.experts" in name and "down_proj" in name:
-                m = re.search(r"experts\.(\d+)\.down_proj", name)
-                if m is not None:
-                    expert_id = int(m.group(1))
-                    tp_rank = get_tp_rank()
+                elif m_gate is not None:
+                    expert_id = int(m_gate.group(1))
+                    full_intermediate = loaded_weight.shape[0]
+                    per_partition = full_intermediate // get_tp_world_size()
+                    gate_shard = loaded_weight[tp_rank * per_partition:(tp_rank + 1) * per_partition]
+
+                    w13_param_name = name.replace(
+                        f"experts.{expert_id}.gate_proj", "experts.w13_weight"
+                    )
+                    if w13_param_name in params_dict:
+                        param = params_dict[w13_param_name]
+                        half = param.shape[1] // 2
+                        param.data[expert_id, :half].copy_(gate_shard)
+                        loaded_params.add(w13_param_name)
+                    is_found = True
+                elif m_up is not None:
+                    expert_id = int(m_up.group(1))
+                    full_intermediate = loaded_weight.shape[0]
+                    per_partition = full_intermediate // get_tp_world_size()
+                    up_shard = loaded_weight[tp_rank * per_partition:(tp_rank + 1) * per_partition]
+
+                    w13_param_name = name.replace(
+                        f"experts.{expert_id}.up_proj", "experts.w13_weight"
+                    )
+                    if w13_param_name in params_dict:
+                        param = params_dict[w13_param_name]
+                        half = param.shape[1] // 2
+                        param.data[expert_id, half:].copy_(up_shard)
+                        loaded_params.add(w13_param_name)
+                    is_found = True
+                elif m_down is not None:
+                    expert_id = int(m_down.group(1))
                     full_intermediate = loaded_weight.shape[-1]
                     per_partition = full_intermediate // get_tp_world_size()
                     w2_shard = loaded_weight[:, tp_rank * per_partition:(tp_rank + 1) * per_partition]
