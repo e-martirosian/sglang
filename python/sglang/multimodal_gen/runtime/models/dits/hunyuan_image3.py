@@ -812,7 +812,7 @@ class HunYuanSparseMoeBlock(nn.Module):
                 quant_config=quant_config,
                 bias=getattr(config, "mlp_bias", False),
                 prefix=f"{prefix}.shared_mlp",
-                reduce_results=False,
+                reduce_results=True,
             )
         else:
             self.shared_mlp = None
@@ -921,11 +921,10 @@ class HunYuanSparseMoeBlock(nn.Module):
                     tuple(final_hidden_states.shape),
                 )
 
-        # NOTE: No outer all_reduce needed. The AscendTPDispatcher's finalize
-        # routing already performs all-gather across TP ranks, producing full
-        # (synced) output. The shared MLP's down_proj also has reduce_results=False.
-        # Adding an outer all_reduce here would double-count the TP reduction,
-        # amplifying branch diff by tp_size (4x with tp_size=4).
+        # NOTE: The AscendTPDispatcher's finalize routing performs all-gather
+        # internally for the FusedMoE output on NPU. The shared MLP's down_proj
+        # uses reduce_results=True to all-reduce its output across TP ranks.
+        # Both components are now properly TP-synchronized.
 
         if _do_moe_log:
             _out = final_hidden_states.view(orig_shape)
