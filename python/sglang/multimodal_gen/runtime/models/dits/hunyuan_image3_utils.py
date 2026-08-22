@@ -591,15 +591,7 @@ class ImageKVCacheManager:
         value = repeat_kv(value, repeat_num)
 
         attention_mask = attention_mask.contiguous()
-
-        # Cast to float32 for attention computation to match vllm-omni's
-        # SDPA behaviour (CUDA upcasts softmax to fp32 internally).
-        _attn_dtype = query.dtype
-        attn_output = _attention_forward(
-            query.to(torch.float32), key.to(torch.float32), value.to(torch.float32),
-            attention_mask,
-        )
-        attn_output = attn_output.to(_attn_dtype)
+        attn_output = _attention_forward(query, key, value, attention_mask)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(total_tokens, head_num_per_rank, head_dim)

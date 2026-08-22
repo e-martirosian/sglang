@@ -996,6 +996,12 @@ class HunyuanImage3DecoderLayer(nn.Module):
                 _log_branch_diff(hidden_states, residual, 2, self._num_img_log, "after_post_attn_ln", self.layer_id)
             hidden_states = self.mlp(hidden_states)
             if _do_log:
+                # Sync before measuring to ensure any async all_reduce completes
+                try:
+                    import torch_npu
+                    torch_npu.npu.synchronize()
+                except Exception:
+                    pass
                 _layer_debug_log(
                     "[L%d layer] after_mlp: std=%.6f",
                     self.layer_id, hidden_states.float().std().item(),
