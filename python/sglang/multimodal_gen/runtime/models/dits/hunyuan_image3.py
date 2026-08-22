@@ -1008,6 +1008,10 @@ class HunyuanImage3DecoderLayer(nn.Module):
                 attn_meta=attn_meta, attention_mask=attention_mask,
                 custom_pos_emb=custom_pos_emb,
             )
+            # Compact per-layer measurement: raw attention output diff (no residual)
+            if os.environ.get("HUNYUAN_DEBUG"):
+                _attn_diff = (hidden_states[:hidden_states.shape[0]//2].float() - hidden_states[hidden_states.shape[0]//2:].float()).std().item()
+                _layer_debug_log("[L%d layer] raw_attn_out: std=%.6f branch_diff=%.6f", self.layer_id, hidden_states.float().std().item(), _attn_diff)
             hidden_states = residual + hidden_states
             if _do_log:
                 _layer_debug_log(
@@ -1026,20 +1030,22 @@ class HunyuanImage3DecoderLayer(nn.Module):
                 # Also log raw post_attn_ln diff (without residual)
                 _log_branch_diff(hidden_states, None, 2, self._num_img_log, "after_post_attn_ln_raw", self.layer_id)
             hidden_states = self.mlp(hidden_states)
-            if _do_log:
-                # Sync before measuring to ensure any async all_reduce completes
+            # Compact per-layer measurement: raw MLP output diff (no residual)
+            if os.environ.get("HUNYUAN_DEBUG"):
                 try:
                     import torch_npu
                     torch_npu.npu.synchronize()
                 except Exception:
                     pass
+                _mlp_diff = (hidden_states[:hidden_states.shape[0]//2].float() - hidden_states[hidden_states.shape[0]//2:].float()).std().item()
+                _layer_debug_log("[L%d layer] raw_mlp_out: std=%.6f branch_diff=%.6f", self.layer_id, hidden_states.float().std().item(), _mlp_diff)
+            if _do_log:
                 _layer_debug_log(
                     "[L%d layer] after_mlp: std=%.6f absmean=%.6f",
                     self.layer_id, hidden_states.float().std().item(),
                     hidden_states.float().abs().mean().item(),
                 )
                 _log_branch_diff(hidden_states, residual, 2, self._num_img_log, "after_mlp", self.layer_id)
-                # Also log raw MLP output diff (without residual) for comparison with MoE block
                 _log_branch_diff(hidden_states, None, 2, self._num_img_log, "after_mlp_raw", self.layer_id)
             hidden_states = residual + hidden_states
             if _do_log:
