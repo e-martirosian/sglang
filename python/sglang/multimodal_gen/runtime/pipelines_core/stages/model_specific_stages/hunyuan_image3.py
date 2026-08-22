@@ -161,6 +161,9 @@ def _build_causal_attention_mask(
 ) -> torch.Tensor:
     """Build 4D causal attention mask with full attention at image positions.
 
+    Matches vllm-omni's ``_prepare_attention_mask_for_generation`` which uses
+    the same causal + bidirectional-image-block pattern.
+
     Args:
         batch_size: batch size (may be doubled for CFG).
         seq_len: total sequence length.
@@ -170,7 +173,7 @@ def _build_causal_attention_mask(
     """
     # Causal (lower-triangular) mask
     mask = torch.ones(seq_len, seq_len, dtype=torch.bool, device=device).tril(0)
-    # Enable full attention at image positions
+    # Enable full attention at image positions (matches vllm-omni)
     for slices in image_slices:
         for s in slices:
             mask[s, s] = True
