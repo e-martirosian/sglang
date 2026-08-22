@@ -46,6 +46,7 @@ def _layer_debug_log(msg, *args):
         logger.info(msg, *args)
 
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
+from sglang.srt.layers.moe.topk import TopK
 from sglang.multimodal_gen.runtime.distributed import (
     get_tp_rank,
     get_tp_world_size,
@@ -723,9 +724,9 @@ class HunYuanCrossAttention(nn.Module):
 
 
 class HunYuanSparseMoeBlock(nn.Module):
-    """Sparse MoE block using SRT FusedMoE (matching vllm-omni reference).
+    """Sparse MoE block using SRT FusedMoE with separate TopK routing.
 
-    FusedMoE handles routing + fused expert computation internally.
+    TopK handles softmax + top-k routing, FusedMoE handles expert computation.
     A separate shared MLP (when present) is always applied to all tokens.
     """
 
@@ -746,6 +747,13 @@ class HunYuanSparseMoeBlock(nn.Module):
         self.gate = ReplicatedLinear(
             config.hidden_size, config.num_experts, bias=False,
             quant_config=None, prefix=f"{prefix}.gate",
+        )
+
+        norm_topk_prob = getattr(config, "norm_topk_prob", True)
+        self.topk = TopK(
+            top_k=top_k,
+            renormalize=norm_topk_prob,
+            layer_id=layer_id,
         )
 
         if getattr(config, "use_mixed_mlp_moe", 0) > 0:
@@ -783,11 +791,11 @@ class HunYuanSparseMoeBlock(nn.Module):
         # Router logits: [num_tokens, num_experts]
         router_logits, _ = self.gate(hidden_states)
 
-        # FusedMoE handles routing + expert computation internally
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-        )
+        # TopK routing: softmax + top-k selection
+        topk_output = self.topk(hidden_states, router_logits)
+
+        # FusedMoE expert computation
+        final_hidden_states = self.experts(hidden_states, topk_output)
 
         # Shared MLP contribution (always applied to all tokens)
         if self.shared_mlp is not None:
