@@ -563,6 +563,16 @@ class HunYuanAttention(nn.Module):
                 tuple(k.shape), k.float().std().item(),
                 tuple(v.shape), v.float().std().item(),
             )
+            # QKV branch_diff (before RoPE)
+            _qf = q.float(); _sl = _qf.shape[0] // 2
+            _layer_debug_log("[L%d attn] qkv_q_branch_diff: %.6f",
+                self.layer_id, (_qf[:_sl] - _qf[_sl:2*_sl]).std().item())
+            _kf = k.float(); _sl = _kf.shape[0] // 2
+            _layer_debug_log("[L%d attn] qkv_k_branch_diff: %.6f",
+                self.layer_id, (_kf[:_sl] - _kf[_sl:2*_sl]).std().item())
+            _vf = v.float(); _sl = _vf.shape[0] // 2
+            _layer_debug_log("[L%d attn] qkv_v_branch_diff: %.6f",
+                self.layer_id, (_vf[:_sl] - _vf[_sl:2*_sl]).std().item())
 
         if attn_meta is not None:
             assert positions is None
@@ -618,6 +628,39 @@ class HunYuanAttention(nn.Module):
             v = v.view(-1, self.num_kv_heads, self.head_dim)
             attn_output = self.attn(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0))
 
+            # Manual attention in fp32 to compare with optimized kernel
+            if _do_log:
+                _bs = q.unsqueeze(0).shape[0]
+                _sl = q.unsqueeze(0).shape[1]
+                _nh = q.shape[-2]
+                _hd = q.shape[-1]
+                _mq = q.view(_bs, _sl, _nh, _hd).transpose(1, 2).float()
+                _mk = k.view(_bs, _sl, self.num_kv_heads, _hd).transpose(1, 2).float()
+                _mv = v.view(_bs, _sl, self.num_kv_heads, _hd).transpose(1, 2).float()
+                if _nh != self.num_kv_heads:
+                    _rep = _nh // self.num_kv_heads
+                    _mk = _mk.repeat_interleave(_rep, dim=1)
+                    _mv = _mv.repeat_interleave(_rep, dim=1)
+                _qs = (_mq @ _mk.transpose(-2, -1)) * self.scaling
+                _causal = torch.triu(torch.ones(_sl, _sl, device=_qs.device, dtype=torch.bool), diagonal=1)
+                _qs.masked_fill_(_causal.unsqueeze(0).unsqueeze(0), float('-inf'))
+                _sp = torch.softmax(_qs, dim=-1)
+                _mout = (_sp @ _mv).transpose(1, 2).reshape(_bs * _sl, _nh * _hd)
+                _opt = attn_output.float()
+                _layer_debug_log("[L%d attn] MANUAL_QK: max=%.4f min=%.4f std=%.4f",
+                    self.layer_id, _qs.max().item(), _qs.min().item(), _qs.std().item())
+                _layer_debug_log("[L%d attn] MANUAL_SOFTMAX: max=%.6f std=%.6f",
+                    self.layer_id, _sp.max().item(), _sp.std().item())
+                _layer_debug_log("[L%d attn] MANUAL_attn_output: std=%.6f branch_diff=%.6f",
+                    self.layer_id, _mout.std().item(),
+                    (_mout[:_sl] - _mout[_sl:2*_sl]).std().item())
+                _layer_debug_log("[L%d attn] OPT_vs_MANUAL: diff=%.6f (opt=%.6f)",
+                    self.layer_id, (_opt - _mout).std().item(), _opt.std().item())
+                _ao = attn_output.float()
+                _sl2 = _ao.shape[0] // 2
+                _layer_debug_log("[L%d attn] OPT_attn_branch_diff: %.6f",
+                    self.layer_id, (_ao[:_sl2] - _ao[_sl2:2*_sl2]).std().item())
+
         attn_output = attn_output.view(q.shape[0], -1)
 
         if _do_log:
@@ -654,6 +697,10 @@ class HunYuanAttention(nn.Module):
                 "[L%d attn] o_proj output: %s std=%.6f",
                 self.layer_id, tuple(output.shape), output.float().std().item(),
             )
+            _of = output.float()
+            _osl = _of.shape[0] // 2
+            _layer_debug_log("[L%d attn] oproj_branch_diff: %.6f",
+                self.layer_id, (_of[:_osl] - _of[_osl:2*_osl]).std().item())
             if attn_meta is not None and len(attn_meta.query_lens) >= 2:
                 _n_img = attn_meta.num_image_tokens
                 _total = output.shape[0]
@@ -758,6 +805,15 @@ class HunYuanCrossAttention(nn.Module):
                 self.layer_id, tuple(q.shape), q.float().std().item(),
                 k.float().std().item(), v.float().std().item(),
             )
+            _qf = q.float(); _sl = _qf.shape[0] // 2
+            _layer_debug_log("[L%d cross_attn] q_branch_diff: %.6f",
+                self.layer_id, (_qf[:_sl] - _qf[_sl:2*_sl]).std().item())
+            _kf = k.float(); _sl = _kf.shape[0] // 2
+            _layer_debug_log("[L%d cross_attn] k_branch_diff: %.6f",
+                self.layer_id, (_kf[:_sl] - _kf[_sl:2*_sl]).std().item())
+            _vf = v.float(); _sl = _vf.shape[0] // 2
+            _layer_debug_log("[L%d cross_attn] v_branch_diff: %.6f",
+                self.layer_id, (_vf[:_sl] - _vf[_sl:2*_sl]).std().item())
 
         if attn_meta is not None:
             assert positions is None
@@ -799,6 +855,39 @@ class HunYuanCrossAttention(nn.Module):
             v = v.view(-1, self.num_kv_heads, self.head_dim)
             attn_output = self.attn(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0))
 
+            # Manual attention in fp32 to compare with optimized kernel
+            if _do_log:
+                _bs = q.unsqueeze(0).shape[0]
+                _sl = q.unsqueeze(0).shape[1]
+                _nh = q.shape[-2]
+                _hd = q.shape[-1]
+                _mq = q.view(_bs, _sl, _nh, _hd).transpose(1, 2).float()
+                _mk = k.view(_bs, _sl, self.num_kv_heads, _hd).transpose(1, 2).float()
+                _mv = v.view(_bs, _sl, self.num_kv_heads, _hd).transpose(1, 2).float()
+                if _nh != self.num_kv_heads:
+                    _rep = _nh // self.num_kv_heads
+                    _mk = _mk.repeat_interleave(_rep, dim=1)
+                    _mv = _mv.repeat_interleave(_rep, dim=1)
+                _qs = (_mq @ _mk.transpose(-2, -1)) * self.scaling
+                _causal = torch.triu(torch.ones(_sl, _sl, device=_qs.device, dtype=torch.bool), diagonal=1)
+                _qs.masked_fill_(_causal.unsqueeze(0).unsqueeze(0), float('-inf'))
+                _sp = torch.softmax(_qs, dim=-1)
+                _mout = (_sp @ _mv).transpose(1, 2).reshape(_bs * _sl, _nh * _hd)
+                _opt = attn_output.float()
+                _layer_debug_log("[L%d cross_attn] MANUAL_QK: max=%.4f min=%.4f std=%.4f",
+                    self.layer_id, _qs.max().item(), _qs.min().item(), _qs.std().item())
+                _layer_debug_log("[L%d cross_attn] MANUAL_SOFTMAX: max=%.6f std=%.6f",
+                    self.layer_id, _sp.max().item(), _sp.std().item())
+                _layer_debug_log("[L%d cross_attn] MANUAL_attn_output: std=%.6f branch_diff=%.6f",
+                    self.layer_id, _mout.std().item(),
+                    (_mout[:_sl] - _mout[_sl:2*_sl]).std().item())
+                _layer_debug_log("[L%d cross_attn] OPT_vs_MANUAL: diff=%.6f (opt=%.6f)",
+                    self.layer_id, (_opt - _mout).std().item(), _opt.std().item())
+                _ao = attn_output.float()
+                _sl2 = _ao.shape[0] // 2
+                _layer_debug_log("[L%d cross_attn] OPT_attn_branch_diff: %.6f",
+                    self.layer_id, (_ao[:_sl2] - _ao[_sl2:2*_sl2]).std().item())
+
         attn_output = attn_output.view(q.shape[0], -1)
         output, _ = self.o_proj(attn_output)
 
@@ -807,6 +896,10 @@ class HunYuanCrossAttention(nn.Module):
                 "[L%d cross_attn] output: %s std=%.6f",
                 self.layer_id, tuple(output.shape), output.float().std().item(),
             )
+            _of = output.float()
+            _osl = _of.shape[0] // 2
+            _layer_debug_log("[L%d cross_attn] oproj_branch_diff: %.6f",
+                self.layer_id, (_of[:_osl] - _of[_osl:2*_osl]).std().item())
 
         return output, (ori_k, v)
 
