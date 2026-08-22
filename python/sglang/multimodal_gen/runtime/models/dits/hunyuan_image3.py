@@ -887,8 +887,10 @@ class HunYuanSparseMoeBlock(nn.Module):
                 _fc0 = final_hidden_states[:_slen].float()
                 _fc1 = final_hidden_states[_slen:2*_slen].float()
                 _layer_debug_log(
-                    "[L%d moe] combined: all=%.6f",
+                    "[L%d moe] combined: all=%.6f absmean=%.6f shape=%s",
                     self.layer_id, (_fc0 - _fc1).std().item(),
+                    final_hidden_states.float().abs().mean().item(),
+                    tuple(final_hidden_states.shape),
                 )
 
         # NOTE: No outer all_reduce needed. The AscendTPDispatcher's finalize
@@ -897,6 +899,18 @@ class HunYuanSparseMoeBlock(nn.Module):
         # Adding an outer all_reduce here would double-count the TP reduction,
         # amplifying branch diff by tp_size (4x with tp_size=4).
 
+        if _do_moe_log:
+            _out = final_hidden_states.view(orig_shape)
+            _bs = 2
+            _slen = _out.shape[0] // _bs
+            _o0 = _out[:_slen].float()
+            _o1 = _out[_slen:2*_slen].float()
+            _layer_debug_log(
+                "[L%d moe] moe_return: all=%.6f absmean=%.6f shape=%s orig_shape=%s",
+                self.layer_id, (_o0 - _o1).std().item(),
+                _out.float().abs().mean().item(),
+                tuple(_out.shape), tuple(orig_shape),
+            )
         return final_hidden_states.view(orig_shape)
 
 
@@ -1003,8 +1017,9 @@ class HunyuanImage3DecoderLayer(nn.Module):
                 except Exception:
                     pass
                 _layer_debug_log(
-                    "[L%d layer] after_mlp: std=%.6f",
+                    "[L%d layer] after_mlp: std=%.6f absmean=%.6f",
                     self.layer_id, hidden_states.float().std().item(),
+                    hidden_states.float().abs().mean().item(),
                 )
                 _log_branch_diff(hidden_states, residual, 2, self._num_img_log, "after_mlp", self.layer_id)
             hidden_states = residual + hidden_states
