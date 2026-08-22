@@ -834,8 +834,20 @@ class HunYuanSparseMoeBlock(nn.Module):
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
 
+        _do_moe_log = os.environ.get("HUNYUAN_DEBUG") and self.layer_id < 2
+
         # Router logits: [num_tokens, num_experts]
         router_logits, _ = self.gate(hidden_states)
+
+        if _do_moe_log:
+            _bs = 2
+            _slen = router_logits.shape[0] // _bs
+            _rl0 = router_logits[:_slen].float()
+            _rl1 = router_logits[_slen:2*_slen].float()
+            _layer_debug_log(
+                "[L%d moe] router_logits: all=%.6f",
+                self.layer_id, (_rl0 - _rl1).std().item(),
+            )
 
         # TopK routing: softmax + top-k selection
         topk_output = self.topk(hidden_states, router_logits)
@@ -843,9 +855,39 @@ class HunYuanSparseMoeBlock(nn.Module):
         # FusedMoE expert computation
         final_hidden_states = self.experts(hidden_states, topk_output)
 
+        if _do_moe_log:
+            _bs = 2
+            _slen = final_hidden_states.shape[0] // _bs
+            _fe0 = final_hidden_states[:_slen].float()
+            _fe1 = final_hidden_states[_slen:2*_slen].float()
+            _layer_debug_log(
+                "[L%d moe] fused_experts: all=%.6f",
+                self.layer_id, (_fe0 - _fe1).std().item(),
+            )
+
         # Shared MLP contribution (always applied to all tokens)
         if self.shared_mlp is not None:
-            final_hidden_states = final_hidden_states + self.shared_mlp(hidden_states)
+            _shared_out = self.shared_mlp(hidden_states)
+            if _do_moe_log:
+                _bs = 2
+                _slen = _shared_out.shape[0] // _bs
+                _sh0 = _shared_out[:_slen].float()
+                _sh1 = _shared_out[_slen:2*_slen].float()
+                _layer_debug_log(
+                    "[L%d moe] shared_mlp: all=%.6f",
+                    self.layer_id, (_sh0 - _sh1).std().item(),
+                )
+            final_hidden_states = final_hidden_states + _shared_out
+
+            if _do_moe_log:
+                _bs = 2
+                _slen = final_hidden_states.shape[0] // _bs
+                _fc0 = final_hidden_states[:_slen].float()
+                _fc1 = final_hidden_states[_slen:2*_slen].float()
+                _layer_debug_log(
+                    "[L%d moe] combined: all=%.6f",
+                    self.layer_id, (_fc0 - _fc1).std().item(),
+                )
 
         # Single all-reduce after combining all expert + shared outputs
         if self.tp_size > 1:
