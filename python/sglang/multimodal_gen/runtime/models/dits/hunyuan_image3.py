@@ -45,6 +45,29 @@ def _layer_debug_log(msg, *args):
     if os.environ.get("HUNYUAN_DEBUG"):
         logger.info(msg, *args)
 
+
+def _log_branch_diff(h, r, bs, num_img, tag, layer_id):
+    """Log per-stage branch diff (txt/img/all) for diffusion debugging."""
+    if not os.environ.get("HUNYUAN_DEBUG") or bs < 2:
+        return
+    seq_len = h.shape[0] // bs
+    eff = h if r is None else h + r
+    h0 = eff[:seq_len].float()
+    h1 = eff[seq_len:2 * seq_len].float()
+    all_diff = (h0 - h1).std().item()
+    if num_img > 0 and num_img < seq_len:
+        txt_diff = (h0[:seq_len - num_img] - h1[:seq_len - num_img]).std().item()
+        img_diff = (h0[seq_len - num_img:] - h1[seq_len - num_img:]).std().item()
+        _layer_debug_log(
+            "[L%d %s] all=%.6f txt=%.6f img=%.6f",
+            layer_id, tag, all_diff, txt_diff, img_diff,
+        )
+    else:
+        _layer_debug_log(
+            "[L%d %s] all=%.6f",
+            layer_id, tag, all_diff,
+        )
+
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
 from sglang.multimodal_gen.runtime.distributed import (
@@ -581,11 +604,18 @@ class HunYuanAttention(nn.Module):
                 _slen = _total // _bs
                 if _n_img > 0 and _n_img < _slen:
                     _ao = attn_output.float()
-                    _a0 = _ao[:_slen][_slen - _n_img:]
-                    _a1 = _ao[_slen:2*_slen][_slen - _n_img:]
+                    _a0 = _ao[:_slen]
+                    _a1 = _ao[_slen:2*_slen]
                     _layer_debug_log(
                         "[L%d attn] attn_img_branch_diff=%.6f",
-                        self.layer_id, (_a0 - _a1).std().item(),
+                        self.layer_id, (_a0[_slen - _n_img:] - _a1[_slen - _n_img:]).std().item(),
+                    )
+                    _layer_debug_log(
+                        "[L%d attn] attn_branch: all=%.6f txt=%.6f img=%.6f",
+                        self.layer_id,
+                        (_a0 - _a1).std().item(),
+                        (_a0[:_slen - _n_img] - _a1[:_slen - _n_img]).std().item(),
+                        (_a0[_slen - _n_img:] - _a1[_slen - _n_img:]).std().item(),
                     )
 
         output, _ = self.o_proj(attn_output)
@@ -595,6 +625,22 @@ class HunYuanAttention(nn.Module):
                 "[L%d attn] o_proj output: %s std=%.6f",
                 self.layer_id, tuple(output.shape), output.float().std().item(),
             )
+            if attn_meta is not None and len(attn_meta.query_lens) >= 2:
+                _n_img = attn_meta.num_image_tokens
+                _total = output.shape[0]
+                _bs = len(attn_meta.query_lens)
+                _slen = _total // _bs
+                if _n_img > 0 and _n_img < _slen:
+                    _oo = output.float()
+                    _o0 = _oo[:_slen]
+                    _o1 = _oo[_slen:2*_slen]
+                    _layer_debug_log(
+                        "[L%d attn] oproj_branch: all=%.6f txt=%.6f img=%.6f",
+                        self.layer_id,
+                        (_o0 - _o1).std().item(),
+                        (_o0[:_slen - _n_img] - _o1[:_slen - _n_img]).std().item(),
+                        (_o0[_slen - _n_img:] - _o1[_slen - _n_img:]).std().item(),
+                    )
 
         return output, (ori_k, v)
 
@@ -863,11 +909,16 @@ class HunyuanImage3DecoderLayer(nn.Module):
     ):
         _do_log = os.environ.get("HUNYUAN_DEBUG") and self.layer_id < 2
         if attention_mask is not None:
+            # Branch-diff tracking state: effective = _bh + _br
+            _bh = None
+            _br = None
             if _do_log:
+                _bh = hidden_states
                 _layer_debug_log(
                     "[L%d layer] in: %s std=%.6f",
                     self.layer_id, tuple(hidden_states.shape), hidden_states.float().std().item(),
                 )
+                _log_branch_diff(_bh, _br, 2, self._num_img_log, "in", self.layer_id)
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
             if _do_log:
@@ -875,6 +926,7 @@ class HunyuanImage3DecoderLayer(nn.Module):
                     "[L%d layer] after_input_ln: std=%.6f",
                     self.layer_id, hidden_states.float().std().item(),
                 )
+                _log_branch_diff(hidden_states, residual, 2, self._num_img_log, "after_input_ln", self.layer_id)
             hidden_states, ori_kv_states = self.self_attn(
                 positions=positions, hidden_states=hidden_states,
                 forward_batch=forward_batch, kv_states=kv_states,
@@ -887,6 +939,7 @@ class HunyuanImage3DecoderLayer(nn.Module):
                     "[L%d layer] after_attn_res: std=%.6f",
                     self.layer_id, hidden_states.float().std().item(),
                 )
+                _log_branch_diff(hidden_states, None, 2, self._num_img_log, "after_attn_res", self.layer_id)
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)
             if _do_log:
@@ -894,18 +947,21 @@ class HunyuanImage3DecoderLayer(nn.Module):
                     "[L%d layer] after_post_attn_ln: std=%.6f",
                     self.layer_id, hidden_states.float().std().item(),
                 )
+                _log_branch_diff(hidden_states, residual, 2, self._num_img_log, "after_post_attn_ln", self.layer_id)
             hidden_states = self.mlp(hidden_states)
             if _do_log:
                 _layer_debug_log(
                     "[L%d layer] after_mlp: std=%.6f",
                     self.layer_id, hidden_states.float().std().item(),
                 )
+                _log_branch_diff(hidden_states, residual, 2, self._num_img_log, "after_mlp", self.layer_id)
             hidden_states = residual + hidden_states
             if _do_log:
                 _layer_debug_log(
                     "[L%d layer] out: std=%.6f",
                     self.layer_id, hidden_states.float().std().item(),
                 )
+                _log_branch_diff(hidden_states, None, 2, self._num_img_log, "out", self.layer_id)
         else:
             if residual is None:
                 residual = hidden_states
@@ -994,6 +1050,7 @@ class HunyuanImage3Model(nn.Module):
         cla_factor = _get_cla_factor(self.config)
         prev_kv_states = None
         for i, layer in enumerate(self.layers):
+            layer._num_img_log = _num_img
             hidden_states, residual, kv_states = layer(
                 None, hidden_states, None, residual,
                 prev_kv_states, attn_meta, attention_mask, custom_pos_emb,
