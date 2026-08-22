@@ -200,6 +200,23 @@ class HunYuanRotary2DEmbedder:
             q.float().mean().item(), q.float().std().item(),
             k.float().mean().item(), k.float().std().item(),
         )
+        # Branch diff BEFORE RoPE (split along batch dim)
+        if bs >= 2:
+            _qf = q.float()
+            _sl = _qf.shape[0] // 2
+            _rope_debug_log("[RoPE]   q_pre_branch_diff: %.6f",
+                (_qf[:_sl] - _qf[_sl:2*_sl]).std().item())
+            _kf = k.float()
+            _sl = _kf.shape[0] // 2
+            _rope_debug_log("[RoPE]   k_pre_branch_diff: %.6f",
+                (_kf[:_sl] - _kf[_sl:2*_sl]).std().item())
+        # cos/sin branch diff
+        if bs >= 2 and cos.shape[0] >= 2:
+            _sl = cos.shape[0] // 2
+            _rope_debug_log("[RoPE]   cos_branch_diff: %.6f",
+                (cos[:_sl].float() - cos[_sl:2*_sl].float()).std().item())
+            _rope_debug_log("[RoPE]   sin_branch_diff: %.6f",
+                (sin[:_sl].float() - sin[_sl:2*_sl].float()).std().item())
 
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
@@ -208,6 +225,16 @@ class HunYuanRotary2DEmbedder:
             q.float().mean().item(), q.float().std().item(),
             k.float().mean().item(), k.float().std().item(),
         )
+        # Branch diff AFTER RoPE (split along batch dim)
+        if bs >= 2:
+            _qf = q.float()
+            _sl = _qf.shape[0] // 2
+            _rope_debug_log("[RoPE]   q_post_branch_diff: %.6f",
+                (_qf[:_sl] - _qf[_sl:2*_sl]).std().item())
+            _kf = k.float()
+            _sl = _kf.shape[0] // 2
+            _rope_debug_log("[RoPE]   k_post_branch_diff: %.6f",
+                (_kf[:_sl] - _kf[_sl:2*_sl]).std().item())
 
         q = (
             q.transpose(1, 2)

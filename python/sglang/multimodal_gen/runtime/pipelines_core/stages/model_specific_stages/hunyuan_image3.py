@@ -1072,6 +1072,17 @@ class HunyuanImage3AR(PipelineStage):
                         _slen = _hs.shape[0] // 2
                         _hin_diff = (_hs[:_slen] - _hs[_slen:2*_slen]).std().item()
                         logger.info("[DEBUG] step%d backbone_input_branch_diff: %.6f", step_idx, _hin_diff)
+                        # Image/text breakdown
+                        if first_step and image_mask is not None:
+                            _img_mask = image_mask[0].bool().cpu()
+                            _txt_mask = ~_img_mask
+                            _hin_diff_3d = _hs[:_slen] - _hs[_slen:2*_slen]  # [slen, hidden]
+                            if _img_mask.any():
+                                logger.info("[DEBUG]   backbone_in image_pos(%d) branch_diff: %.6f",
+                                    _img_mask.sum().item(), _hin_diff_3d[_img_mask].std().item())
+                            if _txt_mask.any():
+                                logger.info("[DEBUG]   backbone_in text_pos(%d) branch_diff: %.6f",
+                                    _txt_mask.sum().item(), _hin_diff_3d[_txt_mask].std().item())
 
                 # Run backbone
                 backbone_out = backbone_fn(

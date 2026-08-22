@@ -555,7 +555,7 @@ class HunYuanAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        _do_log = os.environ.get("HUNYUAN_DEBUG") and self.layer_id < 2
+        _do_log = os.environ.get("HUNYUAN_DEBUG")
         if _do_log:
             _layer_debug_log(
                 "[L%d attn] qkv_proj: q=%s std=%.6f | k=%s std=%.6f | v=%s std=%.6f",
@@ -573,13 +573,42 @@ class HunYuanAttention(nn.Module):
 
         if _do_log:
             _layer_debug_log(
-                "[L%d attn] after_rope: q std=%.6f | k std=%.6f",
-                self.layer_id, q.float().std().item(), k.float().std().item(),
+                "[L%d attn] rope_q_after: shape=%s dtype=%s std=%.6f",
+                self.layer_id, tuple(q.shape), q.dtype, q.float().std().item(),
             )
+            _layer_debug_log(
+                "[L%d attn] rope_k_after: shape=%s dtype=%s std=%.6f",
+                self.layer_id, tuple(k.shape), k.dtype, k.float().std().item(),
+            )
+            _hs = q.float()
+            _sl = _hs.shape[0] // 2
+            _layer_debug_log("[L%d attn] rope_q_branch_diff: %.6f",
+                self.layer_id, (_hs[:_sl] - _hs[_sl:2*_sl]).std().item())
+            _hs = k.float()
+            _sl = _hs.shape[0] // 2
+            _layer_debug_log("[L%d attn] rope_k_branch_diff: %.6f",
+                self.layer_id, (_hs[:_sl] - _hs[_sl:2*_sl]).std().item())
 
         if self.use_qk_norm:
             q = self.query_layernorm(q.view(-1, self.num_heads, self.head_dim).contiguous())
             k = self.key_layernorm(k.view(-1, self.num_kv_heads, self.head_dim).contiguous())
+            if _do_log:
+                _layer_debug_log(
+                    "[L%d attn] qk_norm_q: std=%.6f",
+                    self.layer_id, q.float().std().item(),
+                )
+                _layer_debug_log(
+                    "[L%d attn] qk_norm_k: std=%.6f",
+                    self.layer_id, k.float().std().item(),
+                )
+                _qf = q.float()
+                _sl = _qf.shape[0] // 2
+                _layer_debug_log("[L%d attn] qk_norm_q_branch_diff: %.6f",
+                    self.layer_id, (_qf[:_sl] - _qf[_sl:2*_sl]).std().item())
+                _kf = k.float()
+                _sl = _kf.shape[0] // 2
+                _layer_debug_log("[L%d attn] qk_norm_k_branch_diff: %.6f",
+                    self.layer_id, (_kf[:_sl] - _kf[_sl:2*_sl]).std().item())
 
         if attn_meta is not None:
             attn_output = self.image_attn(q, k, v, attn_meta, attention_mask=attention_mask)
@@ -722,7 +751,7 @@ class HunYuanCrossAttention(nn.Module):
 
         q, _ = self.q_proj(hidden_states)
 
-        _do_log = os.environ.get("HUNYUAN_DEBUG") and self.layer_id < 2
+        _do_log = os.environ.get("HUNYUAN_DEBUG")
         if _do_log:
             _layer_debug_log(
                 "[L%d cross_attn] q_proj: %s std=%.6f | k(from_master): std=%.6f | v(from_master): std=%.6f",
@@ -741,13 +770,26 @@ class HunYuanCrossAttention(nn.Module):
 
         if _do_log:
             _layer_debug_log(
-                "[L%d cross_attn] after_rope: q std=%.6f",
-                self.layer_id, q.float().std().item(),
+                "[L%d cross_attn] rope_q_after: shape=%s dtype=%s std=%.6f",
+                self.layer_id, tuple(q.shape), q.dtype, q.float().std().item(),
             )
+            _hs = q.float()
+            _sl = _hs.shape[0] // 2
+            _layer_debug_log("[L%d cross_attn] rope_q_branch_diff: %.6f",
+                self.layer_id, (_hs[:_sl] - _hs[_sl:2*_sl]).std().item())
 
         if self.use_qk_norm:
             q = self.query_layernorm(q.view(-1, self.num_heads, self.head_dim).contiguous())
             k = self.key_layernorm(k.view(-1, self.num_kv_heads, self.head_dim).contiguous())
+            if _do_log:
+                _layer_debug_log(
+                    "[L%d cross_attn] qk_norm_q: std=%.6f",
+                    self.layer_id, q.float().std().item(),
+                )
+                _qf = q.float()
+                _sl = _qf.shape[0] // 2
+                _layer_debug_log("[L%d cross_attn] qk_norm_q_branch_diff: %.6f",
+                    self.layer_id, (_qf[:_sl] - _qf[_sl:2*_sl]).std().item())
 
         if attn_meta is not None:
             attn_output = self.image_attn(q, k, v, attn_meta, attention_mask=attention_mask)
@@ -847,19 +889,31 @@ class HunYuanSparseMoeBlock(nn.Module):
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        _do_moe_log = os.environ.get("HUNYUAN_DEBUG") and self.layer_id < 2
+        _do_moe_log = os.environ.get("HUNYUAN_DEBUG")
 
         # Router logits: [num_tokens, num_experts]
+        if _do_moe_log:
+            _layer_debug_log(
+                "[L%d moe] moe_input: shape=%s dtype=%s std=%.6f",
+                self.layer_id, tuple(hidden_states.shape), hidden_states.dtype,
+                hidden_states.float().std().item(),
+            )
         router_logits, _ = self.gate(hidden_states)
 
         if _do_moe_log:
-            _bs = 2
-            _slen = router_logits.shape[0] // _bs
-            _rl0 = router_logits[:_slen].float()
-            _rl1 = router_logits[_slen:2*_slen].float()
             _layer_debug_log(
-                "[L%d moe] router_logits: all=%.6f",
-                self.layer_id, (_rl0 - _rl1).std().item(),
+                "[L%d moe] moe_router_logits: shape=%s mean=%.6f std=%.6f max=%.6f",
+                self.layer_id, tuple(router_logits.shape),
+                router_logits.float().mean().item(),
+                router_logits.float().std().item(),
+                router_logits.float().max().item(),
+            )
+            _rlf = router_logits.float()
+            _rl_sl = _rlf.shape[0] // 2
+            _layer_debug_log(
+                "[L%d moe] router_logits_branch_diff: %.6f",
+                self.layer_id,
+                (_rlf[:_rl_sl] - _rlf[_rl_sl:2*_rl_sl]).std().item(),
             )
 
         # TopK routing: softmax + top-k selection
@@ -877,6 +931,11 @@ class HunYuanSparseMoeBlock(nn.Module):
                 pass
 
         if _do_moe_log:
+            _layer_debug_log(
+                "[L%d moe] moe_output: shape=%s dtype=%s std=%.6f",
+                self.layer_id, tuple(final_hidden_states.shape),
+                final_hidden_states.dtype, final_hidden_states.float().std().item(),
+            )
             _bs = 2
             _slen = final_hidden_states.shape[0] // _bs
             _fe0 = final_hidden_states[:_slen].float()
@@ -938,6 +997,10 @@ class HunYuanSparseMoeBlock(nn.Module):
                 _out.float().abs().mean().item(),
                 tuple(_out.shape), tuple(orig_shape),
             )
+            _layer_debug_log(
+                "[L%d moe] moe_branch_diff: %.6f",
+                self.layer_id, (_o0 - _o1).std().item(),
+            )
         return final_hidden_states.view(orig_shape)
 
 
@@ -994,7 +1057,7 @@ class HunyuanImage3DecoderLayer(nn.Module):
         self, positions, hidden_states, forward_batch, residual,
         kv_states=None, attn_meta=None, attention_mask=None, custom_pos_emb=None,
     ):
-        _do_log = os.environ.get("HUNYUAN_DEBUG") and self.layer_id < 2
+        _do_log = os.environ.get("HUNYUAN_DEBUG")
         if attention_mask is not None:
             # Branch-diff tracking state: effective = _bh + _br
             _bh = None
