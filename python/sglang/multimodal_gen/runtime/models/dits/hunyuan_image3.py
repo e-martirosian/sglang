@@ -899,20 +899,17 @@ class HunYuanSparseMoeBlock(nn.Module):
                 final_hidden_states.float().abs().mean().item(),
             )
         if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+            # TEMP DEBUG: skip outer all_reduce to test if FusedMoE already does it
+            import os as _os
+            _skip_ar = _os.environ.get("HUNYUAN_SKIP_MOE_AR", "0") == "1"
+            if not _skip_ar:
+                final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
             if _do_moe_log:
-                # Force sync to ensure all_reduce completed
-                try:
-                    torch.npu.synchronize()
-                except Exception:
-                    torch.cuda.synchronize()
-                _bs = 2
-                _slen = final_hidden_states.shape[0] // _bs
-                _ar0 = final_hidden_states[:_slen].float()
-                _ar1 = final_hidden_states[_slen:2*_slen].float()
                 _layer_debug_log(
-                    "[L%d moe] after_allreduce: all=%.6f absmean=%.6f",
-                    self.layer_id, (_ar0 - _ar1).std().item(),
+                    "[L%d moe] after_allreduce(skip=%d): all=%.6f absmean=%.6f",
+                    self.layer_id, int(_skip_ar),
+                    (final_hidden_states[:final_hidden_states.shape[0]//2].float() -
+                     final_hidden_states[final_hidden_states.shape[0]//2:].float()).std().item(),
                     final_hidden_states.float().abs().mean().item(),
                 )
 
