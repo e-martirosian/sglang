@@ -620,6 +620,40 @@ class ImageKVCacheManager:
         attention_mask = attention_mask.contiguous()
         attn_output = _attention_forward(query, key, value, attention_mask)
 
+        # Manual fp32 attention comparison (matches sglang attention diagnostics)
+        if os.environ.get("HUNYUAN_DEBUG"):
+            try:
+                _mq = query.float()
+                _mk = key.float()
+                _mv = value.float()
+                _sc = 1.0 / (head_dim ** 0.5)
+                # QK scores [bs, heads, sl, sl]
+                _qs = torch.matmul(_mq, _mk.transpose(-2, -1)) * _sc
+                # Apply same mask (True=attend → 0, False=mask → -inf)
+                _mask_f = (~attention_mask).float() * float('-inf')
+                _qs = _qs + _mask_f
+                _sp = torch.softmax(_qs, dim=-1)
+                _mout = torch.matmul(_sp, _mv)  # [bs, heads, sl, head_dim]
+                # Compare with optimized SDPA
+                _opt = attn_output.float()
+                _diff = (_opt - _mout).abs().mean().item()
+                _rope_debug_log("[image_attn] MANUAL_QK: max=%.4f min=%.4f std=%.4f",
+                    _qs.max().item(), _qs.min().item(), _qs.std().item())
+                _rope_debug_log("[image_attn] MANUAL_SOFTMAX: max=%.6f std=%.6f",
+                    _sp.max().item(), _sp.std().item())
+                _rope_debug_log("[image_attn] OPT_vs_MANUAL: mean_abs_diff=%.8f",
+                    _diff)
+                # Branch diff: manual vs optimized
+                _mout_t = _mout.transpose(1, 2).reshape(total_tokens, -1)
+                _opt_t = _opt.transpose(1, 2).reshape(total_tokens, -1)
+                _sl = total_tokens // bs
+                _rope_debug_log("[image_attn] MANUAL_branch_diff: %.6f",
+                    (_mout_t[:_sl] - _mout_t[_sl:2*_sl]).std().item())
+                _rope_debug_log("[image_attn] OPT_branch_diff: %.6f",
+                    (_opt_t[:_sl] - _opt_t[_sl:2*_sl]).std().item())
+            except Exception as _e:
+                _rope_debug_log("[image_attn] MANUAL error: %s", _e)
+
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(total_tokens, head_num_per_rank, head_dim)
         return attn_output
