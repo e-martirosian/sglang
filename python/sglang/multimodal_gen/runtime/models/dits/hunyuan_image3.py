@@ -855,6 +855,14 @@ class HunYuanSparseMoeBlock(nn.Module):
         # FusedMoE expert computation
         final_hidden_states = self.experts(hidden_states, topk_output)
 
+        # Sync to ensure FusedMoE's async all_reduce completes before measuring
+        if _do_moe_log:
+            try:
+                import torch_npu
+                torch_npu.npu.synchronize()
+            except Exception:
+                pass
+
         if _do_moe_log:
             _bs = 2
             _slen = final_hidden_states.shape[0] // _bs
@@ -869,6 +877,13 @@ class HunYuanSparseMoeBlock(nn.Module):
         # Shared MLP contribution (always applied to all tokens)
         if self.shared_mlp is not None:
             _shared_out = self.shared_mlp(hidden_states)
+            # Sync to ensure shared_mlp's async operations complete
+            if _do_moe_log:
+                try:
+                    import torch_npu
+                    torch_npu.npu.synchronize()
+                except Exception:
+                    pass
             if _do_moe_log:
                 _bs = 2
                 _slen = _shared_out.shape[0] // _bs
