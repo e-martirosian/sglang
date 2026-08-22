@@ -986,6 +986,11 @@ class HunyuanImage3AR(PipelineStage):
         # Backbone forward agent (bound to num_image_tokens for KV cache)
         backbone_fn = partial(self._backbone_forward, num_image_tokens)
 
+        # DIAGNOSTIC: parallel unconditional denoising trajectory
+        # This tells us if the model's predictions are fundamentally broken
+        # or if it's just the CFG signal that's too weak.
+        latents_uncond_only = latents.clone()
+
         # 8. Diffusion sampling loop
         for step_idx, t in enumerate(timesteps):
             first_step = step_idx == 0
@@ -1110,8 +1115,22 @@ class HunyuanImage3AR(PipelineStage):
             latent_dtype = latents.dtype
             latents = scheduler.step(pred, t, latents, return_dict=False)[0].to(dtype=latent_dtype)
 
-            if _debug and (step_idx == 0 or step_idx % 10 == 0):
-                logger.info("[DEBUG] step%d latents: %s", step_idx, _tensor_stats(latents))
+            # DIAGNOSTIC: parallel unconditional denoising (manual Euler step)
+            if do_cfg:
+                _sigmas = scheduler.sigmas
+                _si = scheduler.step_index  # already incremented by scheduler.step()
+                if _si is not None and _si >= 1:
+                    _si_curr = _si - 1  # sigma index for THIS step
+                    if _si_curr < len(_sigmas) - 1:
+                        _dt = (_sigmas[_si_curr + 1] - _sigmas[_si_curr]).to(pred_uncond.dtype)
+                        latents_uncond_only = (latents_uncond_only + _dt * pred_uncond.to(latents_uncond_only.dtype)).to(dtype=latent_dtype)
+
+            if _debug:  # Log EVERY step (not just every 10)
+                logger.info("[DEBUG] step%d t=%.4f latents: %s", step_idx, t.item() if isinstance(t, torch.Tensor) else t, _tensor_stats(latents))
+                if do_cfg:
+                    logger.info("[DEBUG] step%d latents_uncond_only: %s", step_idx, _tensor_stats(latents_uncond_only))
+                    _guidance_signal = (pred_cond - pred_uncond)
+                    logger.info("[DEBUG] step%d guidance_signal (cond-uncond): %s", step_idx, _tensor_stats(_guidance_signal))
 
             # After first step, text tokens are no longer needed
             if first_step:
@@ -1121,6 +1140,11 @@ class HunyuanImage3AR(PipelineStage):
                 # forward_block handles this via the attn_meta mechanism.
 
         # 9. Store latents for the decoding stage.
+        # DIAGNOSTIC: also save unconditional-only latents for comparison
+        if do_cfg and _debug:
+            batch.extra["latents_uncond_only"] = latents_uncond_only.to(torch.bfloat16).unsqueeze(2)
+            logger.info("[DEBUG] SAVED latents_uncond_only: %s (decode this to check if model works without CFG)",
+                        _tensor_stats(batch.extra["latents_uncond_only"]))
         # The denoising loop produces latents in the VAE-encoded space.
         # The decoding stage's ``scale_and_shift`` will convert them to
         # raw VAE space (``latents / scaling_factor + shift_factor``)
