@@ -446,108 +446,29 @@ def _attention_forward(
         scale=scale,
     )
 
-    # --- Attention internals diagnostics ---
+    # --- Attention I/O diagnostics ---
     if os.environ.get("HUNYUAN_DEBUG"):
         try:
-            _bs, _nh, _sl, _hd = query.shape
+            _bs = query.shape[0]
             _tag = f"L{layer_id}" if layer_id >= 0 else "attn"
-
-            # 1. Log INPUTS: Q, K, V
             _qf = query.float()
             _kf = key.float()
             _vf = value.float()
-            _q_std = _qf.std().item()
-            _k_std = _kf.std().item()
-            _v_std = _vf.std().item()
-            # Branch diff of inputs (cond vs uncond, split along batch dim)
             _q_bd = (_qf[:_bs//2] - _qf[_bs//2:]).std().item() if _bs >= 2 else 0.0
             _k_bd = (_kf[:_bs//2] - _kf[_bs//2:]).std().item() if _bs >= 2 else 0.0
             _v_bd = (_vf[:_bs//2] - _vf[_bs//2:]).std().item() if _bs >= 2 else 0.0
             logger.info(
                 "[%s attn] INPUT  Q: std=%.6f bdiff=%.6f | K: std=%.6f bdiff=%.6f | V: std=%.6f bdiff=%.6f",
-                _tag, _q_std, _q_bd, _k_std, _k_bd, _v_std, _v_bd,
+                _tag, _qf.std().item(), _q_bd, _kf.std().item(), _k_bd, _vf.std().item(), _v_bd,
             )
-
-            # 2. Log MASK structure
-            _am = attention_mask
-            _sample = _am[0, 0] if _am.dim() == 4 else _am[0]
-            if _sample.dim() >= 2:
-                _row0 = _sample[0].sum().item()
-                _mid = _sl // 4
-                _rowM = _sample[_mid].sum().item()
-                _last = _sample[-1].sum().item()
-                logger.info(
-                    "[%s attn] MASK   shape=%s dtype=%s | row0=%d row%d=%d rowLast=%d",
-                    _tag, tuple(_am.shape), _am.dtype, int(_row0), _mid, int(_rowM), int(_last),
-                )
-
-            # 3. Step 1: QK scores (memory-efficient — no full-tensor copies)
-            _qk = torch.matmul(_qf, _kf.transpose(-2, -1)) * scale
-            _qk_masked = _qk.clone()
-            _qk_masked.masked_fill_(~attention_mask, float('-inf'))
-            # std of finite values: replace -inf with 0 in-place (no copy)
-            _qk_masked.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
-            _qk_std_val = _qk_masked.std().item()
-            # branch_diff: compute directly on [B, NH, S, S] without reshape
-            _qk_bd = 0.0
-            if _bs >= 2:
-                _half = _bs // 2
-                _diff = _qk_masked[:_half] - _qk_masked[_half:2*_half]
-                _qk_bd = _diff.std().item()
-                del _diff
+            _of = output.float()
+            _o_bd = (_of[:_bs//2] - _of[_bs//2:]).std().item() if _bs >= 2 else 0.0
             logger.info(
-                "[%s attn] QK     finite_std=%.6f branch_diff=%.6f",
-                _tag, _qk_std_val, _qk_bd,
+                "[%s attn] OUTPUT std=%.6f bdiff=%.6f",
+                _tag, _of.std().item(), _o_bd,
             )
-
-            # 4. Step 2: Softmax (chunked to save memory)
-            _sm = torch.softmax(_qk_masked.float(), dim=-1).to(query.dtype)
-            del _qk_masked, _qk  # free QK tensors before output computation
-            _sm_std = _sm.std().item()
-            _sm_bd = 0.0
-            if _bs >= 2:
-                _half = _bs // 2
-                _diff = _sm[:_half] - _sm[_half:2*_half]
-                _sm_bd = _diff.std().item()
-                del _diff
-            logger.info(
-                "[%s attn] SM     std=%.6f branch_diff=%.6f",
-                _tag, _sm_std, _sm_bd,
-            )
-
-            # 5. Step 3: Output = softmax @ V (bf16)
-            _out_manual = torch.matmul(_sm, _vf)
-            _out_std = _out_manual.std().item()
-            _out_bd = 0.0
-            if _bs >= 2:
-                _half = _bs // 2
-                _diff = _out_manual[:_half] - _out_manual[_half:2*_half]
-                _out_bd = _diff.std().item()
-                del _diff
-            logger.info(
-                "[%s attn] OUT_manual: std=%.6f branch_diff=%.6f",
-                _tag, _out_std, _out_bd,
-            )
-
-            # 6. Log SDPA OUTPUT and compare with manual
-            _opt = output.float()
-            _opt_std = _opt.std().item()
-            _opt_bd = 0.0
-            if _bs >= 2:
-                _half = _bs // 2
-                _diff = _opt[:_half] - _opt[_half:2*_half]
-                _opt_bd = _diff.std().item()
-                del _diff
-            _sdpa_vs_manual = (_opt - _out_manual.float()).abs().mean().item()
-            logger.info(
-                "[%s attn] OUT_sdpa:   std=%.6f branch_diff=%.6f | SDPA_vs_manual=%.8f",
-                _tag, _opt_std, _opt_bd, _sdpa_vs_manual,
-            )
-
         except Exception as _e:
-            import traceback
-            logger.info("[attn] DECOMP error: %s", _e)
-            logger.info("[attn] DECOMP traceback: %s", traceback.format_exc())
+            logger.info("[attn] DIAG error: %s", _e)
 
     return output
 

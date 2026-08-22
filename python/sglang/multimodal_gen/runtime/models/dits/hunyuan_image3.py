@@ -79,6 +79,15 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 
+
+def _bdiff(t):
+    """Branch diff: std of first-half minus second-half along batch dim 0."""
+    if t is None or t.dim() < 1 or t.shape[0] < 2:
+        return 0.0
+    h = t.shape[0] // 2
+    return (t[:h] - t[h:2*h]).std().item()
+
+
 # Weight names belonging to the non-AR parts of the HunyuanImage-3 checkpoint
 # (VAE, ViT). These are skipped during backbone weight loading.
 UNEXPECTED_KEYWORDS = [
@@ -409,9 +418,29 @@ class HunYuanMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
+        if os.environ.get("HUNYUAN_DEBUG"):
+            _xf = x.float().detach()
+            logger.info(
+                "[mlp]     IN     std=%.6f bdiff=%.6f", _xf.std().item(), _bdiff(_xf),
+            )
         gate_up, _ = self.gate_up_proj(x)
+        if os.environ.get("HUNYUAN_DEBUG"):
+            _gf = gate_up.float().detach()
+            logger.info(
+                "[mlp]     gate_up std=%.6f bdiff=%.6f", _gf.std().item(), _bdiff(_gf),
+            )
         x = self.act_fn(gate_up)
+        if os.environ.get("HUNYUAN_DEBUG"):
+            _af = x.float().detach()
+            logger.info(
+                "[mlp]     act_out std=%.6f bdiff=%.6f", _af.std().item(), _bdiff(_af),
+            )
         x, _ = self.down_proj(x)
+        if os.environ.get("HUNYUAN_DEBUG"):
+            _of = x.float().detach()
+            logger.info(
+                "[mlp]     OUT    std=%.6f bdiff=%.6f", _of.std().item(), _bdiff(_of),
+            )
         return x
 
 
@@ -721,19 +750,48 @@ class HunYuanSparseMoeBlock(nn.Module):
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
 
+        if os.environ.get("HUNYUAN_DEBUG"):
+            _hf = hidden_states.float().detach()
+            logger.info(
+                "[moe]     IN     std=%.6f bdiff=%.6f", _hf.std().item(), _bdiff(_hf),
+            )
+
         # Router logits: [num_tokens, num_experts]
         router_logits, _ = self.gate(hidden_states)
 
         # TopK routing: softmax + top-k selection
         topk_output = self.topk(hidden_states, router_logits)
 
+        if os.environ.get("HUNYUAN_DEBUG"):
+            _rlf = router_logits.float().detach()
+            logger.info(
+                "[moe]     router  std=%.6f bdiff=%.6f", _rlf.std().item(), _bdiff(_rlf),
+            )
+
         # FusedMoE expert computation
         final_hidden_states = self.experts(hidden_states, topk_output)
+
+        if os.environ.get("HUNYUAN_DEBUG"):
+            _ef = final_hidden_states.float().detach()
+            logger.info(
+                "[moe]     experts std=%.6f bdiff=%.6f", _ef.std().item(), _bdiff(_ef),
+            )
 
         # Shared MLP contribution (always applied to all tokens)
         if self.shared_mlp is not None:
             _shared_out = self.shared_mlp(hidden_states)
+            if os.environ.get("HUNYUAN_DEBUG"):
+                _sf = _shared_out.float().detach()
+                logger.info(
+                    "[moe]     shared  std=%.6f bdiff=%.6f", _sf.std().item(), _bdiff(_sf),
+                )
             final_hidden_states = final_hidden_states + _shared_out
+
+        if os.environ.get("HUNYUAN_DEBUG"):
+            _ff = final_hidden_states.float().detach()
+            logger.info(
+                "[moe]     OUT    std=%.6f bdiff=%.6f", _ff.std().item(), _bdiff(_ff),
+            )
 
         # NOTE: The AscendTPDispatcher's finalize routing performs all-gather
         # internally for the FusedMoE output on NPU. The shared MLP's down_proj
@@ -806,9 +864,28 @@ class HunyuanImage3DecoderLayer(nn.Module):
                 custom_pos_emb=custom_pos_emb,
             )
             hidden_states = residual + hidden_states
+            if os.environ.get("HUNYUAN_DEBUG"):
+                _hf = hidden_states.float().detach()
+                _rf = residual.float().detach()
+                logger.info(
+                    "[L%d dec] attn_out  std=%.6f bdiff=%.6f | resid std=%.6f bdiff=%.6f",
+                    self.layer_id, _hf.std().item(), _bdiff(_hf), _rf.std().item(), _bdiff(_rf),
+                )
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)
+            if os.environ.get("HUNYUAN_DEBUG"):
+                _pf = hidden_states.float().detach()
+                logger.info(
+                    "[L%d dec] post_ln   std=%.6f bdiff=%.6f",
+                    self.layer_id, _pf.std().item(), _bdiff(_pf),
+                )
             hidden_states = self.mlp(hidden_states)
+            if os.environ.get("HUNYUAN_DEBUG"):
+                _mf = hidden_states.float().detach()
+                logger.info(
+                    "[L%d dec] mlp_out   std=%.6f bdiff=%.6f | resid std=%.6f bdiff=%.6f",
+                    self.layer_id, _mf.std().item(), _bdiff(_mf), _rf.std().item(), _bdiff(_rf),
+                )
             hidden_states = residual + hidden_states
         else:
             if residual is None:
