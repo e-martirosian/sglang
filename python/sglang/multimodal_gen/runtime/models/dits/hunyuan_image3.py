@@ -890,8 +890,22 @@ class HunYuanSparseMoeBlock(nn.Module):
                 )
 
         # Single all-reduce after combining all expert + shared outputs
+        if _do_moe_log:
+            _layer_debug_log(
+                "[L%d moe] tp_size=%d",
+                self.layer_id, self.tp_size,
+            )
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+            if _do_moe_log:
+                _bs = 2
+                _slen = final_hidden_states.shape[0] // _bs
+                _ar0 = final_hidden_states[:_slen].float()
+                _ar1 = final_hidden_states[_slen:2*_slen].float()
+                _layer_debug_log(
+                    "[L%d moe] after_allreduce: all=%.6f",
+                    self.layer_id, (_ar0 - _ar1).std().item(),
+                )
 
         return final_hidden_states.view(orig_shape)
 
