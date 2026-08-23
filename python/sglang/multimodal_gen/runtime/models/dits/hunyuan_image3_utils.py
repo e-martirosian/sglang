@@ -19,7 +19,6 @@ Ported from the official HunyuanImage-3 model repository
 """
 
 import math
-import os
 import logging
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -409,10 +408,6 @@ def _attention_forward(
     All tensors in **BNSD** layout ``[batch, heads, seq_len, head_dim]``.
     ``attention_mask`` is a 4-D bool tensor ``[B, 1, Q, K]``
     (True = attend, False = mask out).
-
-    When HUNYUAN_DEBUG=1, computes manual attention step-by-step in bf16
-    to expose each intermediate (QK scores, softmax, output) and compares
-    with the optimized SDPA kernel.
     """
     scale = 1.0 / (query.shape[-1] ** 0.5)
 
@@ -424,30 +419,6 @@ def _attention_forward(
         is_causal=False,
         scale=scale,
     )
-
-    # --- Attention I/O diagnostics ---
-    if os.environ.get("HUNYUAN_DEBUG"):
-        try:
-            _bs = query.shape[0]
-            _tag = f"L{layer_id}" if layer_id >= 0 else "attn"
-            _qf = query.float()
-            _kf = key.float()
-            _vf = value.float()
-            _q_bd = (_qf[:_bs//2] - _qf[_bs//2:]).std().item() if _bs >= 2 else 0.0
-            _k_bd = (_kf[:_bs//2] - _kf[_bs//2:]).std().item() if _bs >= 2 else 0.0
-            _v_bd = (_vf[:_bs//2] - _vf[_bs//2:]).std().item() if _bs >= 2 else 0.0
-            logger.info(
-                "[%s attn] INPUT  Q: std=%.6f bdiff=%.6f | K: std=%.6f bdiff=%.6f | V: std=%.6f bdiff=%.6f",
-                _tag, _qf.std().item(), _q_bd, _kf.std().item(), _k_bd, _vf.std().item(), _v_bd,
-            )
-            _of = output.float()
-            _o_bd = (_of[:_bs//2] - _of[_bs//2:]).std().item() if _bs >= 2 else 0.0
-            logger.info(
-                "[%s attn] OUTPUT std=%.6f bdiff=%.6f",
-                _tag, _of.std().item(), _o_bd,
-            )
-        except Exception as _e:
-            logger.info("[attn] DIAG error: %s", _e)
 
     return output
 
