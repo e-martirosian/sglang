@@ -720,6 +720,7 @@ class HunYuanSparseMoeBlock(nn.Module):
         assert layer_id >= 0
         self.tp_size = get_tp_world_size()
         self.n_routed_experts = config.num_experts
+        self.layer_id = layer_id
 
         top_k = _get_layer_value(config, "moe_topk", layer_id)
         intermediate_size = _get_layer_value(config, "intermediate_size", layer_id, 0)
@@ -727,26 +728,27 @@ class HunYuanSparseMoeBlock(nn.Module):
             intermediate_size = _get_layer_value(config, "moe_intermediate_size", layer_id)
 
         self.gate = ReplicatedLinear(
-            config.hidden_size, config.num_experts, bias=False,
-            quant_config=None, prefix=f"{prefix}.gate",
+            config.hidden_size,
+            config.num_experts,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate",
         )
 
         norm_topk_prob = getattr(config, "norm_topk_prob", True)
         self.topk = TopK(
             top_k=top_k,
-            renormalize=norm_topk_prob,
+            #renormalize=norm_topk_prob,
             layer_id=layer_id,
         )
 
         if getattr(config, "use_mixed_mlp_moe", 0) > 0:
             num_shared_expert = _get_layer_value(config, "num_shared_expert", layer_id)
-            shared_intermediate_size = _get_layer_value(config, "intermediate_size", layer_id)
             self.shared_mlp = HunYuanMLP(
                 hidden_size=config.hidden_size,
-                intermediate_size=shared_intermediate_size * num_shared_expert,
+                intermediate_size=intermediate_size * num_shared_expert,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                bias=getattr(config, "mlp_bias", False),
                 prefix=f"{prefix}.shared_mlp",
                 reduce_results=True,
             )
@@ -758,11 +760,12 @@ class HunYuanSparseMoeBlock(nn.Module):
             top_k=top_k,
             hidden_size=config.hidden_size,
             intermediate_size=intermediate_size,
-            reduce_results=False,
+            reduce_results=True,
             quant_config=quant_config,
             layer_id=layer_id,
             prefix=f"{prefix}.experts",
-            with_bias=getattr(config, "mlp_bias", False),
+            #renormalize=top_k > 1,
+            #with_bias=getattr(config, "mlp_bias", False),
         )
 
     def forward(self, hidden_states):
@@ -772,12 +775,21 @@ class HunYuanSparseMoeBlock(nn.Module):
 
         # Router logits: [num_tokens, num_experts]
         router_logits, _ = self.gate(hidden_states)
+        # from sglang.srt.layers.moe.topk import StandardTopKOutput
 
+        # topk_output = StandardTopKOutput(
+        #     topk_weights=_,
+        #     topk_ids=router_logits,
+        #     router_logits=torch.empty(0, device=hidden_states.device),
+        # )
+        
+        print(f"L[{self.layer_id}] {router_logits.float().detach().mean()} {router_logits.float().detach().std()}")
         # TopK routing: softmax + top-k selection
         topk_output = self.topk(hidden_states, router_logits)
 
         # FusedMoE expert computation
         final_hidden_states = self.experts(hidden_states, topk_output)
+        print(f"L[{self.layer_id}] final_hidden_states {final_hidden_states.float().detach().mean()} {final_hidden_states.float().detach().std()}")
 
         # Shared MLP contribution (always applied to all tokens)
         if self.shared_mlp is not None:
@@ -858,6 +870,8 @@ class HunyuanImage3DecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)
             hidden_states = self.mlp(hidden_states)
+            print(f"[L{self.layer_id}] mlp {hidden_states.float().detach().std()} {hidden_states.float().detach().mean()}")
+
             hidden_states = residual + hidden_states
         else:
             if residual is None:
