@@ -539,9 +539,10 @@ class HunYuanAttention(nn.Module):
         )
 
         if self.use_qk_norm:
-            rms_norm_eps = getattr(config, "rms_norm_eps", 1e-5)
-            self.query_layernorm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-            self.key_layernorm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+            # self.weight = torch.ones(self.head_dim)
+            self.rms_norm_eps = getattr(config, "rms_norm_eps", 1e-5)
+            self.query_layernorm = RMSNorm(self.head_dim, eps=self.rms_norm_eps)
+            self.key_layernorm = RMSNorm(self.head_dim, eps=self.rms_norm_eps)
 
     def forward(
         self,
@@ -553,19 +554,64 @@ class HunYuanAttention(nn.Module):
         attention_mask=None,
         custom_pos_emb=None,
     ):
+        q_len, hidden_size = hidden_states.size()
+        hidden_states = hidden_states.reshape(-1, hidden_size)
+        #print(f"hidden_states={hidden_states.std()} {hidden_states.shape}")
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        #print(f"q={q.std()} k={k.std()} v={v.std()}")
+        
+        #print(f"before rope q/std={q.float().detach().std()} q/mean={q.float().detach().mean()} k/std={k.float().detach().std()} k/mean={k.float().detach().mean()}")
 
         if attn_meta is not None:
             assert positions is None
             q, k = self.image_rope2d_emb(q, k, hidden_states, custom_pos_emb, attn_meta)
         else:
             q, k = self.rotary_emb(positions, q, k)
+
+        # print(f"image_rope2d_emb q={q.std()} k={k.std()} v={v.std()}")
+
         ori_k = k
 
+        # print(
+        #     "Q weight:",
+        #     self.query_layernorm.weight.float().mean().item(),
+        #     self.query_layernorm.weight.float().std().item(),
+        #     self.query_layernorm.weight.float().min().item(),
+        #     self.query_layernorm.weight.float().max().item(),
+        # )
+
+        # print(
+        #     "K weight:",
+        #     self.key_layernorm.weight.float().mean().item(),
+        #     self.key_layernorm.weight.float().std().item(),
+        #     self.key_layernorm.weight.float().min().item(),
+        #     self.key_layernorm.weight.float().max().item(),
+        # )
+
+        # print(
+        #     "Q/K max diff:",
+        #     (
+        #         self.query_layernorm.weight.float()
+        #         - self.key_layernorm.weight.float()
+        #     ).abs().max().item()
+        # )
+
         if self.use_qk_norm:
-            q = self.query_layernorm(q.view(-1, self.num_heads, self.head_dim).contiguous())
-            k = self.key_layernorm(k.view(-1, self.num_kv_heads, self.head_dim).contiguous())
+            import torch_npu
+            # print(f"{q.shape} {k.shape}")
+            #print(f"before use_qk_norm q/std={q.float().detach().std()} q/mean={q.float().detach().mean()} k/std={k.float().detach().std()} k/mean={k.float().detach().mean()}")
+
+            q = torch_npu.npu_rms_norm(q.view(-1, self.num_heads, self.head_dim).contiguous(), gamma=self.query_layernorm.weight.float(), epsilon=self.rms_norm_eps)[0]
+            k = torch_npu.npu_rms_norm(k.view(-1, self.num_kv_heads, self.head_dim).contiguous(), gamma=self.key_layernorm.weight.float(), epsilon=self.rms_norm_eps)[0]
+            #q0 = q.view(-1, self.num_heads, self.head_dim).contiguous()
+            #k0 = k.view(-1, self.num_kv_heads, self.head_dim).contiguous()
+            #q = self.query_layernorm(q0)
+            #k = self.key_layernorm(k0)
+        
+        #print(f"after use_qk_norm q/std={q.float().detach().std()} q/mean={q.float().detach().mean()} k/std={k.float().detach().std()} k/mean={k.float().detach().mean()}")
+
+        #print(f"after self.rms_norm_eps={self.rms_norm_eps} attn_meta={attn_meta is not None} use_qk_norm={self.use_qk_norm} q={q.std()} k={k.std()} v={v.std()}")
 
         if attn_meta is not None:
             attn_output = self.image_attn(q, k, v, attn_meta, attention_mask=attention_mask, layer_id=self.layer_id)
@@ -575,9 +621,11 @@ class HunYuanAttention(nn.Module):
             v = v.view(-1, self.num_kv_heads, self.head_dim)
             attn_output = self.attn(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0))
 
+        # print(f"after attn_output attn_output={attn_output.std()}")
+
         attn_output = attn_output.view(q.shape[0], -1)
         output, _ = self.o_proj(attn_output)
-
+        output = output.reshape(q_len, -1)
         return output, (ori_k, v)
 
 
@@ -854,38 +902,61 @@ class HunyuanImage3DecoderLayer(nn.Module):
         self, positions, hidden_states, forward_batch, residual,
         kv_states=None, attn_meta=None, attention_mask=None, custom_pos_emb=None,
     ):
+        print(f"[L{self.layer_id}] in {hidden_states.float().detach().std()} {hidden_states.float().detach().mean()}")
+
         if attention_mask is not None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
+            # if os.environ.get("HUNYUAN_DEBUG"):
+            _hf = hidden_states.float().detach()
+            _rf = residual.float().detach()
+            # logger.info(
+            #     "[L%d dec] attn_in  std=%.6f bdiff=%.6f | resid std=%.6f bdiff=%.6f",
+            #     self.layer_id, _hf.std().item(), _bdiff(_hf), _rf.std().item(), _bdiff(_rf),
+            # )
             hidden_states, ori_kv_states = self.self_attn(
                 positions=positions, hidden_states=hidden_states,
                 forward_batch=forward_batch, kv_states=kv_states,
                 attn_meta=attn_meta, attention_mask=attention_mask,
                 custom_pos_emb=custom_pos_emb,
             )
+            print(f"[L{self.layer_id}] attn {hidden_states.float().detach().std()} {hidden_states.float().detach().mean()}")
+
+            # if os.environ.get("HUNYUAN_DEBUG"):
+            # _hf = hidden_states.float().detach()
+            # _rf = residual.float().detach()
+            # logger.info(
+            #     "[L%d dec] attn_out  std=%.6f bdiff=%.6f | resid std=%.6f bdiff=%.6f",
+            #     self.layer_id, _hf.std().item(), _bdiff(_hf), _rf.std().item(), _bdiff(_rf),
+            # )
             hidden_states = residual + hidden_states
-            if os.environ.get("HUNYUAN_DEBUG"):
-                _hf = hidden_states.float().detach()
-                _rf = residual.float().detach()
-                logger.info(
-                    "[L%d dec] attn_out  std=%.6f bdiff=%.6f | resid std=%.6f bdiff=%.6f",
-                    self.layer_id, _hf.std().item(), _bdiff(_hf), _rf.std().item(), _bdiff(_rf),
-                )
+            # if os.environ.get("HUNYUAN_DEBUG"):
+            # _hf = hidden_states.float().detach()
+            # _rf = residual.float().detach()
+            # logger.info(
+            #     "[L%d dec] attn_out + residual std=%.6f bdiff=%.6f | resid std=%.6f bdiff=%.6f",
+            #     self.layer_id, _hf.std().item(), _bdiff(_hf), _rf.std().item(), _bdiff(_rf),
+            # )
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)
-            if os.environ.get("HUNYUAN_DEBUG"):
-                _pf = hidden_states.float().detach()
-                logger.info(
-                    "[L%d dec] post_ln   std=%.6f bdiff=%.6f",
-                    self.layer_id, _pf.std().item(), _bdiff(_pf),
-                )
+            print(f"[L{self.layer_id}] post attn {hidden_states.float().detach().std()} {hidden_states.float().detach().mean()}")
+
+            # if os.environ.get("HUNYUAN_DEBUG"):
+            #     _pf = hidden_states.float().detach()
+            #     logger.info(
+            #         "[L%d dec] post_ln   std=%.6f bdiff=%.6f",
+            #         self.layer_id, _pf.std().item(), _bdiff(_pf),
+            #     )
             hidden_states = self.mlp(hidden_states)
-            if os.environ.get("HUNYUAN_DEBUG"):
-                _mf = hidden_states.float().detach()
-                logger.info(
-                    "[L%d dec] mlp_out   std=%.6f bdiff=%.6f | resid std=%.6f bdiff=%.6f",
-                    self.layer_id, _mf.std().item(), _bdiff(_mf), _rf.std().item(), _bdiff(_rf),
-                )
+            print(f"{self.mlp}")
+            print(f"[L{self.layer_id}] mlp {hidden_states.float().detach().std()} {hidden_states.float().detach().mean()}")
+
+            # if os.environ.get("HUNYUAN_DEBUG"):
+            #     _mf = hidden_states.float().detach()
+            #     logger.info(
+            #         "[L%d dec] mlp_out   std=%.6f bdiff=%.6f | resid std=%.6f bdiff=%.6f",
+            #         self.layer_id, _mf.std().item(), _bdiff(_mf), _rf.std().item(), _bdiff(_rf),
+            #     )
             hidden_states = residual + hidden_states
         else:
             if residual is None:
@@ -899,6 +970,7 @@ class HunyuanImage3DecoderLayer(nn.Module):
             )
             hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
             hidden_states = self.mlp(hidden_states)
+        print(f"[L{self.layer_id}] out {hidden_states.float().detach().std()} {hidden_states.float().detach().mean()}")
         return hidden_states, residual, ori_kv_states
 
 

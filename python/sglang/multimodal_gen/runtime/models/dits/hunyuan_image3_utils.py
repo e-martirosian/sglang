@@ -23,6 +23,7 @@ import os
 import logging
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
+from einops import rearrange, repeat
 
 import torch
 import torch.nn.functional as F
@@ -58,63 +59,38 @@ def create_hunyuan_image_attention_meta(
 # 2. RoPE helpers
 # =============================================================
 
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
 
-
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1, mla=False):
-    """Applies Rotary Position Embedding to the query and key tensors.
-
-    Supports both full-dim (cos/sin last dim == q last dim) and half-dim
-    (cos/sin last dim == q last dim // 2) layouts.  The half-dim layout
-    expands cos/sin to full dim via repeat_interleave, then applies
-    neox-style rotate_half (dim i paired with dim i+D/2, same theta).
-    """
-    if position_ids is not None:
-        cos = cos[position_ids]
-        sin = sin[position_ids]
-
-    head_dim = q.shape[-1]
-    cos_dim = cos.shape[-1]
-
-    if cos_dim == head_dim:
-        # Standard full-dim RoPE (original path)
-        cos = cos.unsqueeze(unsqueeze_dim)
-        sin = sin.unsqueeze(unsqueeze_dim)
-
-        if mla:
-            b, h, s, d = q.shape
-            q = q.reshape(b, h, s, d // 2, 2).transpose(4, 3).reshape(b, h, s, d)
-            b, h, s, d = k.shape
-            k = k.reshape(b, h, s, d // 2, 2).transpose(4, 3).reshape(b, h, s, d)
-
-        q_embed = (q * cos) + (rotate_half(q) * sin)
-        k_embed = (k * cos) + (rotate_half(k) * sin)
+def rotate_half(x, interleaved=False):
+    if not interleaved:
+        x1, x2 = x.chunk(2, dim=-1)
+        return torch.cat((-x2, x1), dim=-1)
     else:
-        # Half-dim RoPE: cos/sin has head_dim//2 elements.
-        # The angles from build_2d_rope are ordered as
-        # [θ_y0, θ_x0, θ_y1, θ_x1, ...] (interleaved y/x per frequency).
-        #
-        # Expand to full head_dim by repeating each element:
-        #   [θ_y0, θ_x0, θ_y1, θ_x1, ...]
-        #   → [θ_y0, θ_y0, θ_x0, θ_x0, θ_y1, θ_y1, θ_x1, θ_x1, ...]
-        # Then rotate_half pairs dim i with dim i+D/2 (same theta).
-        # This matches vllm-omni's neox-style RoPE application.
-        assert cos_dim == head_dim // 2, (
-            f"cos last dim {cos_dim} must be head_dim//2 ({head_dim // 2})"
-        )
-        cos = cos.repeat_interleave(2, dim=-1)
-        sin = sin.repeat_interleave(2, dim=-1)
-        cos = cos.unsqueeze(unsqueeze_dim)
-        sin = sin.unsqueeze(unsqueeze_dim)
+        x1, x2 = x[..., ::2], x[..., 1::2]
+        return rearrange(torch.stack((-x2, x1), dim=-1), "... d two -> ... (d two)", two=2)
 
-        q_embed = (q * cos) + (rotate_half(q) * sin)
-        k_embed = (k * cos) + (rotate_half(k) * sin)
 
-    return q_embed, k_embed
+def apply_rotary_pos_emb(q, k, cos, sin):
+    
+    if cos.dim() == 3:
+        cos = cos[0]
+        sin = sin[0]
+    ro_dim = cos.shape[-1] * 2
+    interleaved = False
+    cos = repeat(cos, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
+    sin = repeat(sin, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)")
+    return torch.cat(
+        [
+            q[..., :ro_dim] * cos + rotate_half(q[..., :ro_dim], interleaved) * sin,
+            q[..., ro_dim:],
+        ],
+        dim=-1,
+    ), torch.cat(
+        [
+            k[..., :ro_dim] * cos + rotate_half(k[..., :ro_dim], interleaved) * sin,
+            k[..., ro_dim:],
+        ],
+        dim=-1,
+    )
 
 
 class HunYuanRotary2DEmbedder:
@@ -157,34 +133,37 @@ class HunYuanRotary2DEmbedder:
         custom_pos_emb: tuple[torch.Tensor, torch.Tensor],
         attn_meta: HunYuanImageAttentionMeta | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden_states_shape = hidden_states.shape
+        hidden_states = hidden_states.reshape(-1, hidden_states_shape[-1])
+
         if attn_meta is None:
             return q, k
 
         first_step = attn_meta.first_step
         device = q.device
+        # 1. Prepare cos/sin
         cos, sin = self._prepare_cos_sin(custom_pos_emb, first_step, device)
 
-        total_tokens = q.shape[0]
-        bs = len(attn_meta.query_lens)
-        q_len = total_tokens // bs
+        # 2. Shape validation
+        query_lens: list[int] = attn_meta.query_lens
+        bs = len(query_lens)
+        q_len = query_lens[0]
 
-        # Cast to float32 for RoPE precision (matching vllm-omni)
-        q = q.reshape(bs, q_len, self.num_heads, self.head_dim).transpose(1, 2).to(torch.float32)
-        k = k.reshape(bs, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2).to(torch.float32)
+        assert hidden_states.shape[0] == bs * q_len, f"{hidden_states.shape[0]} != {bs * q_len}"
 
-        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        # 3. Reshape + transpose for apply_rotary_pos_emb
+        #    Assume q shape [B*L, H*D] -> [2, L, H, D] -> [2, H, L, D]
+        q = q.reshape(bs, q_len, self.num_heads, self.head_dim)
+        k = k.reshape(bs, q_len, self.num_kv_heads, self.head_dim)
 
-        q = (
-            q.transpose(1, 2)
-            .reshape(total_tokens, self.num_heads * self.head_dim)
-            .to(torch.bfloat16)
-        )
-        k = (
-            k.transpose(1, 2)
-            .reshape(total_tokens, self.num_kv_heads * self.head_dim)
-            .to(torch.bfloat16)
-        )
+        #print(f"before cos/std={cos.float().detach().std()} cos/mean={sin.float().detach().std()}")
+        q, k = apply_rotary_pos_emb(q.to(torch.float32), k.to(torch.float32), cos, sin)
+        #print(f"after apply_rotary_pos_emb q/std={q.float().detach().std()} q/mean={q.float().detach().mean()} k/std={k.float().detach().std()} k/mean={k.float().detach().mean()}")
 
+        # 5. Restore original shape + convert to bfloat16
+        q = q.reshape(hidden_states.shape[0], self.num_heads * self.head_dim).to(torch.bfloat16)
+        k = k.reshape(hidden_states.shape[0], self.num_kv_heads * self.head_dim).to(torch.bfloat16)
+        hidden_states = hidden_states.reshape(hidden_states_shape)
         return q, k
 
 
