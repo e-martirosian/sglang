@@ -364,6 +364,13 @@ class HunyuanImage3Pipeline(LoRAPipeline, ComposedPipelineBase):
                 model_path=self.model_path,
                 vision_model=self.get_module("vision_model"),
                 vision_aligner=self.get_module("vision_aligner"),
+                # Reuse the scheduler's group ceiling as the initial cond-encode
+                # chunk cap; 1 (the no-grouping default) means unlimited.
+                max_cond_encode_chunk=(
+                    server_args.batching_max_size
+                    if server_args.batching_max_size > 1
+                    else None
+                ),
             ),
             "hunyuan_image3_ar",
         )
