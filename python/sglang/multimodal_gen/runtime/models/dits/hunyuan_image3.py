@@ -25,10 +25,11 @@ embeddings. The MoE block uses SRT FusedMoE for efficient fused expert
 computation.
 """
 
+import logging
 import math
 import re
 import types
-import logging
+import weakref
 from typing import Iterable, Optional, Tuple
 
 import torch
@@ -930,6 +931,67 @@ class HunyuanImage3Model(nn.Module):
         return torch.concat((q, k, v))
 
 
+class HunyuanImage3CacheDitBlock(nn.Module):
+    """Cache-DiT Pattern-3 facade for a HunyuanImage-3 decoder layer.
+
+    Cache-DiT requires blocks whose only stateful tensor is ``hidden_states``.
+    The Hunyuan image path always supplies an image attention mask, where the
+    decoder's residual argument is deliberately reset for every layer.  This
+    facade therefore exposes exactly that tensor-only contract while preserving
+    the model's CLA K/V hand-off for blocks that are actually executed.
+    """
+
+    def __init__(
+        self,
+        layer: HunyuanImage3DecoderLayer,
+        owner: "HunyuanImage3ForCausalMM",
+        layer_idx: int,
+    ) -> None:
+        super().__init__()
+        # The original layer stays registered under owner.model.layers.  Do not
+        # register it again here, otherwise model loading would expose duplicate
+        # parameter paths.
+        object.__setattr__(self, "_layer", layer)
+        self._owner_ref = weakref.ref(owner)
+        self.layer_idx = layer_idx
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        attn_meta: HunYuanImageAttentionMeta,
+        attention_mask: torch.Tensor,
+        custom_pos_emb: tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        owner = self._owner_ref()
+        if owner is None:
+            raise RuntimeError("HunyuanImage-3 Cache-DiT block owner was released.")
+        if attention_mask is None:
+            raise ValueError(
+                "HunyuanImage-3 Cache-DiT requires the image attention-mask path."
+            )
+
+        hidden_states, _residual, kv_states = self._layer(
+            None,
+            hidden_states,
+            None,
+            None,
+            owner._cache_dit_prev_kv_states,
+            attn_meta,
+            attention_mask,
+            custom_pos_emb,
+        )
+        cla_factor = _get_cla_factor(owner.model.config)
+        if (
+            getattr(owner.model.config, "use_cla", False)
+            and self.layer_idx % cla_factor == 0
+        ):
+            owner._cache_dit_prev_kv_states = kv_states
+        else:
+            owner._cache_dit_prev_kv_states = None
+        return hidden_states
+
+
 class HunyuanImage3ForCausalMM(CachableDiT):
     """Top-level HunyuanImage-3 model for diffusion pipeline."""
 
@@ -956,6 +1018,17 @@ class HunyuanImage3ForCausalMM(CachableDiT):
         self.model = HunyuanImage3Model(
             backbone_config, prefix=f"{prefix}.model",
         )
+        # Cache-DiT patches a named direct child of the transformer while its
+        # forward runs.  The lightweight facades keep the checkpoint-owned
+        # decoder layers at ``model.layers`` and make the native AR path use a
+        # cache-dit Pattern-3-compatible block sequence.
+        self.transformer_blocks = nn.ModuleList(
+            [
+                HunyuanImage3CacheDitBlock(layer, self, layer_idx)
+                for layer_idx, layer in enumerate(self.model.layers)
+            ]
+        )
+        self._cache_dit_prev_kv_states = None
         self.unpadded_vocab_size = backbone_config.vocab_size
         # multimodal_gen has no dedicated LM-head layer; the vocab-parallel
         # embedding shares its layout and only `.weight` is consumed downstream.
@@ -1009,18 +1082,62 @@ class HunyuanImage3ForCausalMM(CachableDiT):
             rope_type=getattr(hf_config, "rope_type", "2d"),
         )
 
-    def forward(self, hidden_states, timestep=None, encoder_hidden_states=None, **kwargs):
-        """DiT-style forward for denoising stage."""
-        return hidden_states
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        attention_mask: torch.Tensor,
+        custom_pos_emb: tuple[torch.Tensor, torch.Tensor],
+        num_image_tokens: int,
+        first_step: bool = False,
+    ) -> torch.Tensor:
+        """Run the native AR backbone through the Cache-DiT patch point."""
+        return self.forward_block(
+            hidden_states,
+            attention_mask,
+            custom_pos_emb,
+            num_image_tokens=num_image_tokens,
+            first_step=first_step,
+        )
 
     def forward_block(
         self, hidden_states, attention_mask, custom_pos_emb,
         num_image_tokens=None, first_step=False,
     ):
-        return self.model.forward_block(
-            hidden_states, attention_mask, custom_pos_emb,
-            num_image_tokens=num_image_tokens, first_step=first_step,
+        if num_image_tokens is None:
+            raise ValueError(
+                "num_image_tokens is required for HunyuanImage-3 forward_block."
+            )
+        if not hasattr(self, "_sglang_cache_dit_adapter"):
+            return self.model.forward_block(
+                hidden_states,
+                attention_mask,
+                custom_pos_emb,
+                num_image_tokens=num_image_tokens,
+                first_step=first_step,
+            )
+
+        attn_meta = create_hunyuan_image_attention_meta(
+            attention_mask, num_image_tokens, first_step
         )
+        self._cache_dit_prev_kv_states = None
+        for block in self.transformer_blocks:
+            hidden_states = block(
+                hidden_states,
+                attn_meta=attn_meta,
+                attention_mask=attention_mask,
+                custom_pos_emb=custom_pos_emb,
+            )
+        return hidden_states.contiguous()
+
+    def validate_cache_dit_config(self, config) -> None:
+        """Reject Cache-DiT schedules that cannot preserve CLA K/V state."""
+        if getattr(self.model.config, "use_cla", False) and config.Bn_compute_blocks:
+            raise ValueError(
+                "HunyuanImage-3 Cache-DiT with CLA requires "
+                "Bn_compute_blocks=0 because a cached middle region does not "
+                "materialize the K/V state needed by trailing CLA layers."
+            )
 
     def get_embed_and_head(self):
         return self.model.embed_tokens.weight, self.lm_head.weight

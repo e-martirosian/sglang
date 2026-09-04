@@ -7,11 +7,12 @@ on transformer modules in SGLang's modular pipeline architecture.
 """
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import torch
 import torch.distributed as dist
 
+from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_ring_parallel_world_size,
     get_tp_world_size,
@@ -36,6 +37,13 @@ from cache_dit.parallelism import ParallelismBackend, ParallelismConfig
 from sglang.multimodal_gen.runtime.distributed.parallel_state import get_dit_group
 
 _original_similarity = None
+
+
+def _all_reduce_mean_pair(first, second, group):
+    """Average two scalar statistics with one distributed collective."""
+    stats = torch.stack((first, second))
+    dist.all_reduce(stats, op=dist.ReduceOp.AVG, group=group)
+    return stats[0], stats[1]
 
 
 def disable_cache_on_transformer(transformer: torch.nn.Module) -> torch.nn.Module:
@@ -102,14 +110,15 @@ def _patch_cache_dit_similarity():
                 mean_diff = raw_diff[condition].mean()
                 mean_t1 = t1[condition].abs().mean()
             else:
-                mean_diff = (t1 - t2).abs().mean()
+                mean_diff = raw_diff.mean()
                 mean_t1 = t1.abs().mean()
         else:
             mean_diff = (t1 - t2).abs().mean()
             mean_t1 = t1.abs().mean()
 
-        dist.all_reduce(mean_diff, op=dist.ReduceOp.AVG, group=target_group)
-        dist.all_reduce(mean_t1, op=dist.ReduceOp.AVG, group=target_group)
+        mean_diff, mean_t1 = _all_reduce_mean_pair(
+            mean_diff, mean_t1, target_group
+        )
 
         diff = (mean_diff / mean_t1).item()
         self.add_residual_diff(diff)
@@ -364,15 +373,185 @@ _CUSTOM_BLOCK_ADAPTER_SPECS: dict[str, CustomBlockAdapterSpec] = {
         blocks_attr="blocks",
         forward_pattern=ForwardPattern.Pattern_3,
     ),
+    # HunyuanImage-3 exposes a causal backbone through a native AR stage. Its
+    # top-level model supplies cache-dit-compatible wrappers in
+    # ``transformer_blocks``; the original decoder layers remain at
+    # ``model.layers``.
+    "HunyuanImage3ForCausalMM": CustomBlockAdapterSpec(
+        blocks_attr="transformer_blocks",
+        forward_pattern=ForwardPattern.Pattern_3,
+    ),
 }
+
+
+class CacheDitController:
+    """Request-scoped Cache-DiT lifecycle for native denoising loops.
+
+    ``DenoisingStage`` owns this lifecycle for regular diffusion pipelines.
+    Some models, such as HunyuanImage-3, run a bespoke loop in a model-specific
+    stage instead.  This controller gives those loops the same public
+    enable/disable and request-override semantics without making them inherit
+    the standard denoising implementation.
+    """
+
+    def __init__(self, transformer: torch.nn.Module, server_args: Any) -> None:
+        self.transformer = transformer
+        self.server_args = server_args
+        self.enabled = False
+        self.active_key: tuple | None = None
+        self.request_overrides: dict[str, Any] = {}
+
+    @staticmethod
+    def _requested(sampling_params: Any) -> bool:
+        enabled = getattr(sampling_params, "enable_cache_dit", None)
+        return envs.SGLANG_CACHE_DIT_ENABLED if enabled is None else enabled
+
+    def _build_config(self, num_inference_steps: int) -> CacheDitConfig:
+        overrides = self.request_overrides
+        compute_bins, cache_bins, scm_preset = self._parse_scm_bins()
+        return CacheDitConfig(
+            enabled=True,
+            Fn_compute_blocks=overrides.get(
+                "Fn_compute_blocks", envs.SGLANG_CACHE_DIT_FN
+            ),
+            Bn_compute_blocks=overrides.get(
+                "Bn_compute_blocks", envs.SGLANG_CACHE_DIT_BN
+            ),
+            max_warmup_steps=overrides.get(
+                "max_warmup_steps", envs.SGLANG_CACHE_DIT_WARMUP
+            ),
+            residual_diff_threshold=overrides.get(
+                "residual_diff_threshold", envs.SGLANG_CACHE_DIT_RDT
+            ),
+            max_continuous_cached_steps=overrides.get(
+                "max_continuous_cached_steps", envs.SGLANG_CACHE_DIT_MC
+            ),
+            enable_taylorseer=overrides.get(
+                "enable_taylorseer", envs.SGLANG_CACHE_DIT_TAYLORSEER
+            ),
+            taylorseer_order=overrides.get(
+                "taylorseer_order", envs.SGLANG_CACHE_DIT_TS_ORDER
+            ),
+            num_inference_steps=num_inference_steps,
+            steps_computation_mask=get_scm_mask(
+                preset=scm_preset,
+                num_inference_steps=num_inference_steps,
+                compute_bins=compute_bins,
+                cache_bins=cache_bins,
+            ),
+            steps_computation_policy=overrides.get(
+                "scm_policy", envs.SGLANG_CACHE_DIT_SCM_POLICY
+            ),
+        )
+
+    def _parse_scm_bins(self) -> tuple[list[int] | None, list[int] | None, str]:
+        overrides = self.request_overrides
+        scm_preset = overrides.get("scm_preset", envs.SGLANG_CACHE_DIT_SCM_PRESET)
+        compute_bins = overrides.get("scm_compute_bins")
+        cache_bins = overrides.get("scm_cache_bins")
+        if compute_bins is not None or cache_bins is not None:
+            if compute_bins is None or cache_bins is None:
+                raise ValueError(
+                    "cache_dit_params SCM custom bins require both "
+                    "scm_compute_bins and scm_cache_bins."
+                )
+            return (
+                [int(x) for x in compute_bins],
+                [int(x) for x in cache_bins],
+                scm_preset,
+            )
+
+        compute_bins_str = envs.SGLANG_CACHE_DIT_SCM_COMPUTE_BINS
+        cache_bins_str = envs.SGLANG_CACHE_DIT_SCM_CACHE_BINS
+        if compute_bins_str and cache_bins_str:
+            try:
+                return (
+                    [int(x.strip()) for x in compute_bins_str.split(",")],
+                    [int(x.strip()) for x in cache_bins_str.split(",")],
+                    scm_preset,
+                )
+            except ValueError as exc:
+                logger.warning("Failed to parse Cache-DiT SCM bins: %s", exc)
+                return None, None, "none"
+        if compute_bins_str or cache_bins_str:
+            logger.warning(
+                "Cache-DiT SCM custom bins require both compute and cache bins; "
+                "falling back to preset %r.",
+                scm_preset,
+            )
+        return None, None, scm_preset
+
+    def unmount(self) -> None:
+        if self.enabled:
+            disable_cache_on_transformer(self.transformer)
+        self.enabled = False
+        self.active_key = None
+
+    def configure(
+        self,
+        num_inference_steps: int,
+        batch: Any,
+        tp_group: Optional[torch.distributed.ProcessGroup] = None,
+    ) -> None:
+        """Mount or refresh Cache-DiT at a native loop's request boundary."""
+        sampling_params = batch.sampling_params
+        requested = self._requested(sampling_params)
+        if getattr(self.server_args, "enable_breakable_cuda_graph", False):
+            if requested:
+                logger.warning_once(
+                    "Cache-DiT was requested but is disabled because breakable "
+                    "CUDA graphs are enabled."
+                )
+            self.unmount()
+            return
+
+        # Warmup must always exercise the native model path.  In particular,
+        # unmount an adapter left active by an earlier request before returning.
+        if getattr(batch, "is_warmup", False):
+            self.unmount()
+            return
+
+        self.request_overrides = resolve_cache_dit_request_overrides(
+            getattr(sampling_params, "cache_dit_params", None)
+        )
+        desired_key = (
+            cache_dit_overrides_key(self.request_overrides) if requested else None
+        )
+        if self.enabled and desired_key != self.active_key:
+            self.unmount()
+        if not requested:
+            return
+
+        config = self._build_config(int(num_inference_steps))
+        validator = getattr(self.transformer, "validate_cache_dit_config", None)
+        if validator is not None:
+            validator(config)
+
+        if self.enabled:
+            refresh_context_on_transformer(
+                self.transformer,
+                int(num_inference_steps),
+                steps_computation_mask=config.steps_computation_mask,
+                steps_computation_policy=config.steps_computation_policy,
+            )
+            return
+
+        enable_cache_on_transformer(
+            self.transformer,
+            config,
+            model_name=type(self.transformer).__name__,
+            tp_group=tp_group,
+            has_separate_cfg=False,
+        )
+        self.enabled = True
+        self.active_key = desired_key
 
 
 def _build_custom_block_adapter(
     transformer: torch.nn.Module,
     has_separate_cfg: bool = False,
 ) -> Optional[BlockAdapter]:
-    """Build a manual BlockAdapter for a model absent from cache-dit's registry,
-    or None if the class is unknown."""
+    """Build an SGLang-specific BlockAdapter, or None if the class is unknown."""
     spec = _CUSTOM_BLOCK_ADAPTER_SPECS.get(transformer.__class__.__name__)
     if spec is None:
         return None
@@ -421,23 +600,24 @@ def enable_cache_on_transformer(
             "Please provide it in CacheDitConfig."
         )
 
-    # Prefer the standard path (transformer pre-registered in cache-dit). For
-    # models absent from the registry, fall back to a manual BlockAdapter (see
-    # _build_custom_block_adapter).
-    custom_adapter = None
-    if not BlockAdapterRegister.is_supported(transformer):
-        custom_adapter = _build_custom_block_adapter(
-            transformer, has_separate_cfg=has_separate_cfg
+    # Prefer exact SGLang-specific adapters over cache-dit's prefix-based
+    # registry. For example, HunyuanImage3ForCausalMM starts with the registered
+    # "HunyuanImage" prefix, but its block layout differs from the diffusers
+    # HunyuanImageTransformer2DModel handled by that predefined adapter.
+    custom_adapter = _build_custom_block_adapter(
+        transformer, has_separate_cfg=has_separate_cfg
+    )
+    if custom_adapter is None and not BlockAdapterRegister.is_supported(
+        transformer
+    ):
+        transformer_cls_name = transformer.__class__.__name__
+        raise ValueError(
+            f"{transformer_cls_name} is not officially supported by cache-dit. "
+            "Supported cache-dit DiT families include Flux, QwenImage, HunyuanDiT, "
+            "HunyuanVideo, Wan, CogVideoX, Mochi, and others. "
+            "Please ensure your transformer belongs to one of these families or "
+            "define a custom BlockAdapter."
         )
-        if custom_adapter is None:
-            transformer_cls_name = transformer.__class__.__name__
-            raise ValueError(
-                f"{transformer_cls_name} is not officially supported by cache-dit. "
-                "Supported cache-dit DiT families include Flux, QwenImage, HunyuanDiT, "
-                "HunyuanVideo, Wan, CogVideoX, Mochi, and others. "
-                "Please ensure your transformer belongs to one of these families or "
-                "define a custom BlockAdapter."
-            )
 
     # Build cache config (including SCM fields if provided)
     cache_config = DBCacheConfig(
@@ -713,19 +893,26 @@ def refresh_context_on_transformer(
     num_inference_steps: int,
     scm_preset: str | None = None,
     verbose: bool = False,
+    *,
+    steps_computation_mask: Optional[List[int]] = None,
+    steps_computation_policy: str | None = None,
 ) -> None:
     """Refresh cache-dit context for transformer."""
-    steps_computation_mask = None
-    if scm_preset is not None:
+    if steps_computation_mask is None and scm_preset is not None:
         steps_computation_mask = cache_dit.steps_mask(
             mask_policy=scm_preset, total_steps=num_inference_steps
         )
+    policy = (
+        steps_computation_policy
+        if steps_computation_policy is not None
+        else scm_preset
+    )
     cache_dit.refresh_context(
         transformer,
         cache_config=DBCacheConfig().reset(
             num_inference_steps=num_inference_steps,
             steps_computation_mask=steps_computation_mask,
-            steps_computation_policy=scm_preset,
+            steps_computation_policy=policy,
         ),
         verbose=verbose,
     )

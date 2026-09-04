@@ -20,6 +20,9 @@ from sglang.multimodal_gen.runtime.distributed import (
     get_tp_group,
     model_parallel_is_initialized,
 )
+from sglang.multimodal_gen.runtime.cache.cache_dit_integration import (
+    CacheDitController,
+)
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.managers.memory_managers.component_manager import (
     ComponentUse,
@@ -236,6 +239,26 @@ def _cond_image_to_pil(raw_img):
     return None
 
 
+def resolve_hunyuan_image3_output_resolution(
+    width: int,
+    height: int,
+    explicit_fields: set[str],
+    reference_size: tuple[int, int] | None = None,
+) -> tuple[int, int]:
+    """Resolve the native AR canvas before the processor selects its bucket.
+
+    Explicit output dimensions always take precedence.  For image editing
+    without an explicit output size, use the unmodified reference image as
+    the target canvas so the generic image pipeline default (1280x720) cannot
+    turn a portrait edit into a landscape result.  The returned dimensions
+    are only the requested canvas; the processor remains authoritative for
+    the final supported resolution.
+    """
+    if reference_size is not None and not {"width", "height"} & explicit_fields:
+        width, height = reference_size
+    return align_hunyuan_image3_resolution(width, height)
+
+
 def _build_causal_attention_mask(
     batch_size: int,
     seq_len: int,
@@ -409,6 +432,7 @@ class HunyuanImage3AR(PipelineStage):
         self._drop_think: bool = False
         self._gen_config_steps: int | None = None
         self._gen_config_guidance_scale: float | None = None
+        self._cache_dit_controller: CacheDitController | None = None
 
     def _get_sequence_template(self) -> str:
         """Read sequence_template from model's generation_config, default 'pretrain'.
@@ -614,10 +638,13 @@ class HunyuanImage3AR(PipelineStage):
                 cos = tp_group.broadcast(cos, src=0)
                 sin = tp_group.broadcast(sin, src=0)
 
-        output = self.ar_model.forward_block(
+        # Use ``forward`` rather than calling ``forward_block`` directly: when
+        # Cache-DiT is enabled it patches this entry point and substitutes the
+        # Hunyuan Pattern-3 facade blocks for the duration of the call.
+        output = self.ar_model(
             hidden_states,
-            attention_mask,
-            (cos, sin),
+            attention_mask=attention_mask,
+            custom_pos_emb=(cos, sin),
             num_image_tokens=num_image_tokens,
             first_step=first_step,
         )
@@ -1073,27 +1100,31 @@ class HunyuanImage3AR(PipelineStage):
         if raw_cond_images is not None and not isinstance(raw_cond_images, (list, tuple)):
             raw_cond_images = [raw_cond_images]
 
-        # 2. Determine image resolution.
-        # For TI2I, when the user did not explicitly request an output size,
-        # follow the reference image's size (matching vllm-omni) so the
-        # generated token grid aligns with the reference image's grid.
+        # 2. Determine image resolution.  For image editing without an
+        # explicit output size, start from the original reference size rather
+        # than InputValidationStage's generic landscape default.
         sp = batch.sampling_params
         user_explicit_fields = getattr(sp, "_explicit_fields", set()) if sp else set()
-        first_cond_pil = _cond_image_to_pil(raw_cond_images[0]) if raw_cond_images else None
-        if (
-            first_cond_pil is not None
-            and "width" not in user_explicit_fields
-            and "height" not in user_explicit_fields
-        ):
-            img_w, img_h = first_cond_pil.size
-            width, height = align_hunyuan_image3_resolution(img_w, img_h)
-            batch.width, batch.height = width, height
+        reference_size = getattr(batch, "original_condition_image_size", None)
+        if reference_size is None and raw_cond_images:
+            first_cond_pil = _cond_image_to_pil(raw_cond_images[0])
+            reference_size = first_cond_pil.size if first_cond_pil is not None else None
+
+        width, height = resolve_hunyuan_image3_output_resolution(
+            batch.width,
+            batch.height,
+            user_explicit_fields,
+            reference_size,
+        )
+        if reference_size is not None and not {"width", "height"} & user_explicit_fields:
             logger.info(
                 "TI2I: output resolution follows reference image (%dx%d) -> %dx%d",
-                img_w, img_h, width, height,
+                *reference_size,
+                width,
+                height,
             )
-        else:
-            width, height = align_hunyuan_image3_resolution(batch.width, batch.height)
+        if (batch.width, batch.height) != (width, height):
+            batch.width, batch.height = width, height
         if processor is not None:
             image_info = processor.build_gen_image_info(f"{height}x{width}")
             height = image_info.image_height
@@ -1340,6 +1371,20 @@ class HunyuanImage3AR(PipelineStage):
         # 6. Set up the diffusion scheduler
         num_inference_steps = int(
             getattr(batch, "num_inference_steps", None) or _DEFAULT_NUM_INFERENCE_STEPS
+        )
+        if self._cache_dit_controller is None:
+            self._cache_dit_controller = CacheDitController(
+                self.ar_model, server_args
+            )
+        cache_dit_tp_group = None
+        if model_parallel_is_initialized():
+            tp_group = get_tp_group()
+            if tp_group.world_size > 1:
+                cache_dit_tp_group = tp_group.device_group
+        self._cache_dit_controller.configure(
+            num_inference_steps,
+            batch,
+            tp_group=cache_dit_tp_group,
         )
 
 
