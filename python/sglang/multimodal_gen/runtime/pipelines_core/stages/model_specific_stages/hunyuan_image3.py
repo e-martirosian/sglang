@@ -605,14 +605,14 @@ class HunyuanImage3AR(PipelineStage):
         cos = cos.contiguous()
         sin = sin.contiguous()
 
-        # Broadcast from rank 0 for deterministic TP collectives
+        # hidden_states changes on every denoising step, so it must be
+        # broadcast from rank 0 each step for deterministic TP collectives.
+        # The request-static attention_mask / RoPE tensors are broadcast once
+        # before the loop instead (see _broadcast_static_inputs).
         if model_parallel_is_initialized():
             tp_group = get_tp_group()
             if tp_group.world_size > 1:
                 hidden_states = tp_group.broadcast(hidden_states, src=0)
-                attention_mask = tp_group.broadcast(attention_mask, src=0)
-                cos = tp_group.broadcast(cos, src=0)
-                sin = tp_group.broadcast(sin, src=0)
 
         output = self.ar_model.forward_block(
             hidden_states,
@@ -626,6 +626,31 @@ class HunyuanImage3AR(PipelineStage):
         actual_batch = attention_mask.shape[0]
         actual_seq_len = output.shape[0] // actual_batch
         return output.view(actual_batch, actual_seq_len, hidden_size)
+
+    def _broadcast_static_inputs(
+        self,
+        attention_mask: torch.Tensor,
+        custom_pos_emb: tuple[torch.Tensor, torch.Tensor],
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """Broadcast request-static attention inputs once before the loop.
+
+        ``attention_mask`` and the 2D-RoPE ``cos``/``sin`` tensors are
+        identical on every denoising step, so they are broadcast from rank 0
+        a single time for deterministic TP collectives instead of once per
+        step. ``hidden_states`` still changes each step and is broadcast in
+        ``_backbone_forward``.
+        """
+        attention_mask = attention_mask.contiguous()
+        cos, sin = custom_pos_emb
+        cos = cos.contiguous()
+        sin = sin.contiguous()
+        if model_parallel_is_initialized():
+            tp_group = get_tp_group()
+            if tp_group.world_size > 1:
+                attention_mask = tp_group.broadcast(attention_mask, src=0)
+                cos = tp_group.broadcast(cos, src=0)
+                sin = tp_group.broadcast(sin, src=0)
+        return attention_mask, (cos, sin)
 
     # ------------------------------------------------------------------
     # Diffusion I/O helpers
@@ -1336,6 +1361,13 @@ class HunyuanImage3AR(PipelineStage):
             non_first_sin = non_first_sin.clone()
             non_first_cos[:, 0:1] = _ts_rope_cos
             non_first_sin[:, 0:1] = _ts_rope_sin
+
+        # Broadcast the request-static attention mask and RoPE tensors once
+        # here (they are reused unchanged on every denoising step) instead of
+        # broadcasting them on every backbone forward call.
+        attention_mask, (cos, sin) = self._broadcast_static_inputs(
+            attention_mask, (cos, sin)
+        )
 
         # 6. Set up the diffusion scheduler
         num_inference_steps = int(
