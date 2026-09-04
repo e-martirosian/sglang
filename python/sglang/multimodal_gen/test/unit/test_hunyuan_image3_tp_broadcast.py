@@ -1,5 +1,8 @@
 """Unit tests for HunyuanImage-3 tensor-parallel input broadcasts."""
 
+import ast
+import inspect
+import textwrap
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -33,6 +36,38 @@ class _FakeTPGroup:
 
 
 class TestHunyuanImage3TPBroadcast(CustomTestCase):
+    def test_static_broadcast_happens_outside_denoising_loop(self):
+        source = textwrap.dedent(
+            inspect.getsource(ar_stage.HunyuanImage3AR._forward_batched)
+        )
+        function = ast.parse(source).body[0]
+        static_broadcast_calls = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_broadcast_static_inputs"
+        ]
+        self.assertEqual(len(static_broadcast_calls), 1)
+
+        denoising_loops = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.For)
+            and any(
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == "enumerate"
+                for child in ast.walk(node.iter)
+            )
+        ]
+        self.assertEqual(len(denoising_loops), 1)
+        self.assertLess(
+            static_broadcast_calls[0].lineno,
+            denoising_loops[0].lineno,
+            "request-static inputs must be broadcast before the denoising loop",
+        )
+
     def test_static_inputs_are_broadcast_once(self):
         stage = ar_stage.HunyuanImage3AR.__new__(ar_stage.HunyuanImage3AR)
         tp_group = _FakeTPGroup()
