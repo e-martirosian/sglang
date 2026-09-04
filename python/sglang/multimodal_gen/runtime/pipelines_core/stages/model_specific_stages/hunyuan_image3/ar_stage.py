@@ -309,14 +309,13 @@ class HunyuanImage3AR(PipelineStage):
         cos = cos.contiguous()
         sin = sin.contiguous()
 
-        # Broadcast from rank 0 for deterministic TP collectives
+        # hidden_states changes on every denoising step, so keep its TP
+        # synchronization in the per-step path. Request-static attention
+        # inputs are synchronized once before the loop.
         if model_parallel_is_initialized():
             tp_group = get_tp_group()
             if tp_group.world_size > 1:
                 hidden_states = tp_group.broadcast(hidden_states, src=0)
-                attention_mask = tp_group.broadcast(attention_mask, src=0)
-                cos = tp_group.broadcast(cos, src=0)
-                sin = tp_group.broadcast(sin, src=0)
 
         if self._cache_dit_adapter is not None:
             output = self._cache_dit_adapter(hidden_states, attention_mask, (cos, sin))
@@ -333,6 +332,24 @@ class HunyuanImage3AR(PipelineStage):
         actual_batch = attention_mask.shape[0]
         actual_seq_len = output.shape[0] // actual_batch
         return output.view(actual_batch, actual_seq_len, hidden_size)
+
+    def _broadcast_static_inputs(
+        self,
+        attention_mask: torch.Tensor,
+        custom_pos_emb: tuple[torch.Tensor, torch.Tensor],
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """Synchronize request-static attention inputs once across TP ranks."""
+        attention_mask = attention_mask.contiguous()
+        cos, sin = custom_pos_emb
+        cos = cos.contiguous()
+        sin = sin.contiguous()
+        if model_parallel_is_initialized():
+            tp_group = get_tp_group()
+            if tp_group.world_size > 1:
+                attention_mask = tp_group.broadcast(attention_mask, src=0)
+                cos = tp_group.broadcast(cos, src=0)
+                sin = tp_group.broadcast(sin, src=0)
+        return attention_mask, (cos, sin)
 
     def _instantiate_vae_tokens_first_step(
         self,
@@ -1093,6 +1110,9 @@ class HunyuanImage3AR(PipelineStage):
         attention_mask, cos, sin, mask_shared = self._build_attention_and_rope(
             tokenizer_output, tokenizer_sections, actual_batch_size,
             tok["seq_len"], token_h, token_w, image_info, device, do_cfg,
+        )
+        attention_mask, (cos, sin) = self._broadcast_static_inputs(
+            attention_mask, (cos, sin)
         )
 
         scheduler = self._scheduler
