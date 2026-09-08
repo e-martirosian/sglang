@@ -6,6 +6,7 @@ Ported from the official HunyuanImage-3 repository
 
 import re
 import types
+import weakref
 from typing import Iterable, Optional, Tuple
 
 import torch
@@ -765,8 +766,9 @@ class HunyuanImage3Model(nn.Module):
             hidden_states, residual, kv_states = layer(
                 positions, hidden_states, forward_batch, residual, prev_kv_states,
             )
-            if getattr(self.config, "use_cla", False) and i % cla_factor == 0:
-                prev_kv_states = kv_states
+            if getattr(self.config, "use_cla", False):
+                if i % cla_factor == 0:
+                    prev_kv_states = kv_states
             else:
                 prev_kv_states = None
 
@@ -790,8 +792,9 @@ class HunyuanImage3Model(nn.Module):
                 None, hidden_states, None, residual,
                 prev_kv_states, attn_meta, attention_mask, custom_pos_emb,
             )
-            if getattr(self.config, "use_cla", False) and i % cla_factor == 0:
-                prev_kv_states = kv_states
+            if getattr(self.config, "use_cla", False):
+                if i % cla_factor == 0:
+                    prev_kv_states = kv_states
             else:
                 prev_kv_states = None
 
@@ -1199,27 +1202,45 @@ class _Hi3CacheBlock(nn.Module):
     (ForwardPattern.Pattern_3); the real layer has the AR-backbone signature
     ``(positions, hidden, forward_batch, residual, kv_states, mask, pos_emb)
     -> (hidden, residual, kv)``. In the masked diffusion path the layer resets
-    ``residual = hidden`` internally and CLA is off, so it is a pure
-    ``hidden -> hidden`` map with the two condition tensors passed through.
+    ``residual = hidden`` internally, so it is a ``hidden -> hidden`` map with
+    the two condition tensors passed through. The adapter owns request-local
+    metadata and CLA K/V state for the blocks it actually executes.
 
     The real layer is held by plain reference (object.__setattr__) so its
     parameters stay registered only under ``HunyuanImage3Model.layers`` -- no
     double registration in named_parameters/state_dict.
     """
 
-    def __init__(self, layer: nn.Module):
+    def __init__(
+        self, layer: nn.Module, owner: "Hi3CacheBlockAdapter", layer_idx: int
+    ):
         super().__init__()
         object.__setattr__(self, "_layer", layer)
+        self._owner_ref = weakref.ref(owner)
+        self.layer_idx = layer_idx
 
     def forward(self, hidden_states, attention_mask, custom_pos_emb):
-        # The restored pre-compact attention contract dispatches on attn_meta,
-        # which Model.forward_block always builds via the factory. This adapter
-        # was added after that threading was removed, so it builds the metadata
-        # itself (ImageKVCacheManager only reads query_lens from it).
-        attn_meta = create_hunyuan_image_attention_meta(attention_mask, None, False)
-        hidden_states, _, _ = self._layer(
-            None, hidden_states, None, None, None, attn_meta, attention_mask, custom_pos_emb,
+        owner = self._owner_ref()
+        if owner is None or owner._attn_meta is None:
+            raise RuntimeError(
+                "HunyuanImage-3 Cache-DiT block was called outside its adapter forward."
+            )
+        hidden_states, _, kv_states = self._layer(
+            None,
+            hidden_states,
+            None,
+            None,
+            owner._prev_kv_states,
+            owner._attn_meta,
+            attention_mask,
+            custom_pos_emb,
         )
+        cla_factor = _get_cla_factor(owner._model_config)
+        if getattr(owner._model_config, "use_cla", False):
+            if self.layer_idx % cla_factor == 0:
+                owner._prev_kv_states = kv_states
+        else:
+            owner._prev_kv_states = None
         return hidden_states
 
 
@@ -1243,14 +1264,53 @@ class Hi3CacheBlockAdapter(nn.Module):
 
     def __init__(self, model: "HunyuanImage3Model"):
         super().__init__()
+        self._model_config = model.config
+        self._attn_meta = None
+        self._prev_kv_states = None
         self.blocks = nn.ModuleList(
-            [_Hi3CacheBlock(layer) for layer in model.layers]
+            [
+                _Hi3CacheBlock(layer, self, layer_idx)
+                for layer_idx, layer in enumerate(model.layers)
+            ]
         )
 
-    def forward(self, hidden_states, attention_mask, custom_pos_emb):
-        for block in self.blocks:
-            hidden_states = block(hidden_states, attention_mask, custom_pos_emb)
-        return hidden_states.contiguous()
+    def forward(
+        self,
+        hidden_states,
+        attention_mask,
+        custom_pos_emb,
+        *,
+        num_image_tokens=None,
+        first_step=False,
+    ):
+        if num_image_tokens is None:
+            raise ValueError(
+                "num_image_tokens is required for HunyuanImage-3 Cache-DiT."
+            )
+        self._attn_meta = create_hunyuan_image_attention_meta(
+            attention_mask, num_image_tokens, first_step
+        )
+        self._prev_kv_states = None
+        try:
+            for block in self.blocks:
+                hidden_states = block(hidden_states, attention_mask, custom_pos_emb)
+            return hidden_states.contiguous()
+        finally:
+            # These potentially large tensors belong to one backbone call only.
+            self._attn_meta = None
+            self._prev_kv_states = None
+
+    def validate_cache_dit_config(self, config) -> None:
+        """Reject a cache boundary that could sever a CLA K/V dependency."""
+        if (
+            getattr(self._model_config, "use_cla", False)
+            and config.Bn_compute_blocks
+        ):
+            raise ValueError(
+                "HunyuanImage-3 Cache-DiT with CLA requires "
+                "Bn_compute_blocks=0 because a cached middle region does not "
+                "materialize the K/V state needed by trailing CLA layers."
+            )
 
 
 EntryClass = [HunyuanImage3ForCausalMM]

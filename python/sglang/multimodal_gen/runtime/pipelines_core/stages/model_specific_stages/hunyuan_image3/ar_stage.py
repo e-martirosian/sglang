@@ -9,9 +9,8 @@ from PIL import Image as PILImage
 
 from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.runtime.cache.cache_dit_integration import (
-    CacheDitConfig,
-    enable_cache_on_transformer,
-    refresh_context_on_transformer,
+    CacheDitController,
+    resolve_cache_dit_request_overrides,
 )
 from sglang.multimodal_gen.runtime.distributed import (
     get_local_torch_device,
@@ -202,6 +201,7 @@ class HunyuanImage3AR(PipelineStage):
         model_path: str,
         vision_model,
         vision_aligner,
+        max_cond_encode_chunk: int | None = None,
     ):
         super().__init__()
         self.ar_model = ar_model
@@ -211,10 +211,14 @@ class HunyuanImage3AR(PipelineStage):
         self._model_path = model_path
         self._vision_model = vision_model
         self._vision_aligner = vision_aligner
+        # Initial cap for the cond-encode chunk, derived from the scheduler's
+        # --batching-max-size: an operator raising it declares the device can
+        # take grouped work; None (or 1) leaves the chunk unlimited.
+        self._max_cond_encode_chunk = max_cond_encode_chunk
         self._custom_tokenizer = HunyuanImage3TokenizerWrapper(tokenizer)
         self._gen_config_cache: dict | None = None
         self._cache_dit_adapter = None
-        self._cache_dit_num_steps: int | None = None
+        self._cache_dit_controller: CacheDitController | None = None
 
     def _generation_config(self) -> dict:
         if self._gen_config_cache is None:
@@ -247,56 +251,52 @@ class HunyuanImage3AR(PipelineStage):
         new_info.__dict__.update(image_info.__dict__)
         return new_info
 
-    def _build_cache_dit_config(self, num_inference_steps: int) -> CacheDitConfig:
-        return CacheDitConfig(
-            enabled=True,
-            Fn_compute_blocks=envs.SGLANG_CACHE_DIT_FN,
-            Bn_compute_blocks=envs.SGLANG_CACHE_DIT_BN,
-            max_warmup_steps=envs.SGLANG_CACHE_DIT_WARMUP,
-            residual_diff_threshold=envs.SGLANG_CACHE_DIT_RDT,
-            max_continuous_cached_steps=envs.SGLANG_CACHE_DIT_MC,
-            enable_taylorseer=envs.SGLANG_CACHE_DIT_TAYLORSEER,
-            taylorseer_order=envs.SGLANG_CACHE_DIT_TS_ORDER,
-            num_inference_steps=num_inference_steps,
-        )
+    def _maybe_enable_cache_dit(
+        self,
+        num_inference_steps: int,
+        batch: Req,
+        server_args: ServerArgs,
+        do_cfg: bool,
+    ) -> None:
+        """Configure request-scoped Cache-DiT on the native AR block loop.
 
-    def _maybe_enable_cache_dit(self, num_inference_steps: int) -> None:
-        """Mount cache-dit on the diffusion block loop (env-gated, idempotent).
-
-        Mirrors DenoisingStage._maybe_enable_cache_dit for this custom stage.
-        The AR backbone is not a diffusers DiT, so it is exposed to cache-dit
-        through Hi3CacheBlockAdapter (ForwardPattern.Pattern_3); the
-        SGLANG_CACHE_DIT_* env vars then apply exactly as for GLM-Image/Wan.
+        HI3 runs the conditional and unconditional halves as two sequential
+        backbone calls. Therefore cache-dit's separate-CFG accounting applies
+        exactly when CFG is enabled, and must be remounted when that execution
+        mode changes.
         """
-        if not envs.SGLANG_CACHE_DIT_ENABLED:
-            return
-        if self._cache_dit_adapter is None:
+        cache_requested = CacheDitController.is_requested(batch.sampling_params)
+        if cache_requested and getattr(batch, "enable_teacache", False):
+            raise ValueError(
+                "HunyuanImage-3 does not support Cache-DiT and TeaCache "
+                "together; disable one of them for this request."
+            )
+        if self._cache_dit_controller is None:
+            if not cache_requested:
+                # Match the common denoising path: request knobs are validated
+                # even when this request opts out of cache acceleration.
+                resolve_cache_dit_request_overrides(
+                    getattr(batch.sampling_params, "cache_dit_params", None)
+                )
+                return
             _register_hi3_cache_dit_spec()
             self._cache_dit_adapter = Hi3CacheBlockAdapter(self.ar_model.model)
-            tp_group = None
-            if model_parallel_is_initialized():
-                group = get_tp_group()
-                tp_group = group.device_group if group.world_size > 1 else None
-            enable_cache_on_transformer(
-                self._cache_dit_adapter,
-                self._build_cache_dit_config(num_inference_steps),
-                model_name="hunyuan_image3",
-                tp_group=tp_group,
-                has_separate_cfg=True,
+            self._cache_dit_controller = CacheDitController(
+                self._cache_dit_adapter, server_args
             )
-            self.log_info(
-                "cache-dit enabled on HunyuanImage-3 (Fn=%d Bn=%d W=%d R=%.2f "
-                "MC=%d TaylorSeer=%s)",
-                envs.SGLANG_CACHE_DIT_FN,
-                envs.SGLANG_CACHE_DIT_BN,
-                envs.SGLANG_CACHE_DIT_WARMUP,
-                envs.SGLANG_CACHE_DIT_RDT,
-                envs.SGLANG_CACHE_DIT_MC,
-                envs.SGLANG_CACHE_DIT_TAYLORSEER,
-            )
-        # Refresh every batch: a new generation resets cache-dit's step counter.
-        refresh_context_on_transformer(self._cache_dit_adapter, num_inference_steps)
-        self._cache_dit_num_steps = num_inference_steps
+        else:
+            self._cache_dit_controller.server_args = server_args
+
+        tp_group = None
+        if model_parallel_is_initialized():
+            group = get_tp_group()
+            tp_group = group.device_group if group.world_size > 1 else None
+        self._cache_dit_controller.configure(
+            num_inference_steps,
+            batch,
+            tp_group=tp_group,
+            has_separate_cfg=do_cfg,
+        )
 
     def _backbone_forward(
         self,
@@ -319,12 +319,19 @@ class HunyuanImage3AR(PipelineStage):
             tp_group = get_tp_group()
             if tp_group.world_size > 1:
                 hidden_states = tp_group.broadcast(hidden_states, src=0)
-                attention_mask = tp_group.broadcast(attention_mask, src=0)
-                cos = tp_group.broadcast(cos, src=0)
-                sin = tp_group.broadcast(sin, src=0)
 
-        if self._cache_dit_adapter is not None:
-            output = self._cache_dit_adapter(hidden_states, attention_mask, (cos, sin))
+        cache_enabled = (
+            self._cache_dit_controller is not None
+            and self._cache_dit_controller.enabled
+        )
+        if cache_enabled:
+            output = self._cache_dit_adapter(
+                hidden_states,
+                attention_mask,
+                (cos, sin),
+                num_image_tokens=num_image_tokens,
+                first_step=first_step,
+            )
         else:
             output = self.ar_model.forward_block(
                 hidden_states,
@@ -338,6 +345,24 @@ class HunyuanImage3AR(PipelineStage):
         actual_batch = attention_mask.shape[0]
         actual_seq_len = output.shape[0] // actual_batch
         return output.view(actual_batch, actual_seq_len, hidden_size)
+
+    def _broadcast_static_inputs(
+        self,
+        attention_mask: torch.Tensor,
+        custom_pos_emb: tuple[torch.Tensor, torch.Tensor],
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """Synchronize request-static attention inputs once across TP ranks."""
+        attention_mask = attention_mask.contiguous()
+        cos, sin = custom_pos_emb
+        cos = cos.contiguous()
+        sin = sin.contiguous()
+        if model_parallel_is_initialized():
+            tp_group = get_tp_group()
+            if tp_group.world_size > 1:
+                attention_mask = tp_group.broadcast(attention_mask, src=0)
+                cos = tp_group.broadcast(cos, src=0)
+                sin = tp_group.broadcast(sin, src=0)
+        return attention_mask, (cos, sin)
 
     def _instantiate_vae_tokens_first_step(
         self,
@@ -621,7 +646,7 @@ class HunyuanImage3AR(PipelineStage):
         """Encode ``count`` items via ``run_batch(indices) -> list`` in the
         largest batch that fits.
 
-        Starts with every item in one batched call; on OOM it empties the cache,
+        Starts within the configured chunk cap; on OOM it empties the cache,
         halves the batch, and retries the same items -- down to one at a time.
         Chunking is bit-safe here: VAE conv is independent per batch row and the
         ViT isolates each image via its attention_mask + spatial_shapes (packed
@@ -634,7 +659,8 @@ class HunyuanImage3AR(PipelineStage):
             return []
         results: list = []
         start = 0
-        chunk = count
+        cap = self._max_cond_encode_chunk
+        chunk = min(count, cap) if cap is not None and cap > 1 else count
         while start < count:
             size = min(chunk, count - start)
             try:
@@ -1010,7 +1036,7 @@ class HunyuanImage3AR(PipelineStage):
     @torch.no_grad()
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         clones = self._expand_multi_output(batch)
-        outputs = self._forward_batched(clones)
+        outputs = self._forward_batched(clones, server_args)
         if len(outputs) == 1:
             return outputs[0]
         batch.latents = torch.cat([out.latents for out in outputs], dim=0)
@@ -1051,7 +1077,7 @@ class HunyuanImage3AR(PipelineStage):
                 index, req = group[0]
                 results[index] = self(req, server_args)
                 continue
-            outputs = self._forward_batched([req for _, req in group])
+            outputs = self._forward_batched([req for _, req in group], server_args)
             for (index, _), output in zip(group, outputs):
                 results[index] = output
 
@@ -1087,6 +1113,15 @@ class HunyuanImage3AR(PipelineStage):
         raw_cond_images = self._collect_raw_cond_images(req)
         n_cond = len(raw_cond_images) if raw_cond_images else 0
         width, height = self._effective_resolution(req, raw_cond_images)
+        cache_requested = CacheDitController.is_requested(req.sampling_params)
+        teacache_requested = bool(getattr(req, "enable_teacache", False))
+        if not cache_requested:
+            # Keep request-knob validation consistent even when a request
+            # explicitly opts out; enabled requests validate while resolving
+            # their effective batch key below.
+            resolve_cache_dit_request_overrides(
+                getattr(req.sampling_params, "cache_dit_params", None)
+            )
         return (
             width,
             height,
@@ -1101,10 +1136,24 @@ class HunyuanImage3AR(PipelineStage):
             tuple(req.output_crop_anchor),
             req.output_max_ratio_error,
             req.output_pad_value,
+            # A grouped native loop has one Cache-DiT mount. Keep requests
+            # with different effective cache settings apart instead of letting
+            # the first request's settings silently control the whole group.
+            cache_requested,
+            teacache_requested,
+            CacheDitController.effective_config_key(
+                req.sampling_params,
+                req.num_inference_steps,
+                has_separate_cfg=req.guidance_scale > 1.0,
+            )
+            if cache_requested
+            else None,
         )
 
     @torch.no_grad()
-    def _forward_batched(self, reqs: list[Req]) -> list[Req]:
+    def _forward_batched(
+        self, reqs: list[Req], server_args: ServerArgs
+    ) -> list[Req]:
         tokenizer = self._custom_tokenizer
         n_req = len(reqs)
         head = reqs[0]
@@ -1132,7 +1181,9 @@ class HunyuanImage3AR(PipelineStage):
         else:
             device = model_device
 
-        self._maybe_enable_cache_dit(num_inference_steps)
+        self._maybe_enable_cache_dit(
+            num_inference_steps, head, server_args, do_cfg
+        )
 
         tokenizer_bot_task = self._normalize_bot_task(head.bot_task)
         tokenizer_kwargs = self._build_tokenizer_kwargs(
@@ -1166,6 +1217,9 @@ class HunyuanImage3AR(PipelineStage):
             image_info,
             device,
             do_cfg,
+        )
+        attention_mask, (cos, sin) = self._broadcast_static_inputs(
+            attention_mask, (cos, sin)
         )
 
         scheduler = self._scheduler

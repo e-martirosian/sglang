@@ -212,7 +212,9 @@ def test_multi_output_request_keeps_native_bucket_size(monkeypatch):
     ]
     stage = object.__new__(HunyuanImage3AR)
     monkeypatch.setattr(stage, "_expand_multi_output", lambda _batch: [object()] * 2)
-    monkeypatch.setattr(stage, "_forward_batched", lambda _batches: outputs)
+    monkeypatch.setattr(
+        stage, "_forward_batched", lambda _batches, _server_args: outputs
+    )
     batch = Req(
         sampling_params=SamplingParams(
             prompt="test",

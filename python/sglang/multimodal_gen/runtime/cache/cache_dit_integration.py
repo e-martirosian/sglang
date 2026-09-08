@@ -7,11 +7,12 @@ on transformer modules in SGLang's modular pipeline architecture.
 """
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import torch
 import torch.distributed as dist
 
+from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_ring_parallel_world_size,
     get_tp_world_size,
@@ -77,9 +78,9 @@ def _patch_cache_dit_similarity():
         tp_sp_group = getattr(self, "_sglang_tp_sp_group", None)
         target_group = tp_sp_group or sp_group or tp_group
 
-        # Averaging over a one-rank group returns the input, so skip the
-        # collective rather than pay for a round trip that cannot change it.
-        if target_group is None or dist.get_world_size(target_group) == 1:
+        # No SGLang process group was attached. Preserve cache-dit's default
+        # distributed behavior instead of silently making rank-local choices.
+        if target_group is None:
             return _original_similarity(
                 self,
                 t1,
@@ -89,29 +90,68 @@ def _patch_cache_dit_similarity():
                 prefix=prefix,
             )
 
-        # Adapted from https://github.com/vipshop/cache-dit/blob/main/src/cache_dit/caching/cache_contexts/cache_manager.py#L495-L523
+        # Keep cache-dit's special threshold, shape, and separate-CFG
+        # semantics. Cache decisions must remain identical on every rank.
+        if threshold <= 0.0:
+            self.add_residual_diff(-0.0)
+            return False
+        if threshold >= 1.0:
+            self.add_residual_diff(-1.0)
+            return True
+        if t1.shape != t2.shape:
+            logger.debug("%s, shape error: %s != %s", prefix, t1.shape, t2.shape)
+            self.add_residual_diff(-2.0)
+            return False
+        if all(
+            (
+                self.enable_separate_cfg(),
+                self.is_separate_cfg_step(),
+                not self.cfg_diff_compute_separate(),
+                self.get_current_step_residual_diff() is not None,
+            )
+        ):
+            diff = self.get_current_step_residual_diff()
+            self.add_residual_diff(diff)
+            return diff < threshold
+
+        # Adapted from cache-dit v1.3.0. Keep model-sized intermediates in the
+        # activation dtype, but accumulate the scalar statistics and collective
+        # payload in FP32. This avoids materializing FP32 copies of both inputs.
         condition_thresh = self.get_important_condition_threshold()
         if condition_thresh > 0.0:
             raw_diff = (t1 - t2).abs()
-            token_m_df = raw_diff.mean(dim=-1)
-            token_m_t1 = t1.abs().mean(dim=-1)
+            token_m_df = raw_diff.mean(dim=-1, dtype=torch.float32)
+            token_m_t1 = t1.abs().mean(dim=-1, dtype=torch.float32)
             token_diff = token_m_df / token_m_t1
             condition = token_diff > condition_thresh
             if condition.sum() > 0:
                 condition = condition.unsqueeze(-1).expand_as(raw_diff)
-                mean_diff = raw_diff[condition].mean()
-                mean_t1 = t1[condition].abs().mean()
+                mean_diff = raw_diff[condition].mean(dtype=torch.float32)
+                mean_t1 = t1[condition].abs().mean(dtype=torch.float32)
             else:
-                mean_diff = (t1 - t2).abs().mean()
-                mean_t1 = t1.abs().mean()
+                mean_diff = (t1 - t2).abs().mean(dtype=torch.float32)
+                mean_t1 = t1.abs().mean(dtype=torch.float32)
         else:
-            mean_diff = (t1 - t2).abs().mean()
-            mean_t1 = t1.abs().mean()
+            mean_diff = (t1 - t2).abs().mean(dtype=torch.float32)
+            mean_t1 = t1.abs().mean(dtype=torch.float32)
 
-        dist.all_reduce(mean_diff, op=dist.ReduceOp.AVG, group=target_group)
-        dist.all_reduce(mean_t1, op=dist.ReduceOp.AVG, group=target_group)
+        # One collective replaces the previous two scalar all-reduces. A
+        # one-rank group does not need a collective at all.
+        stats = torch.stack((mean_diff, mean_t1))
+        if dist.get_world_size(target_group) > 1:
+            dist.all_reduce(stats, op=dist.ReduceOp.AVG, group=target_group)
 
-        diff = (mean_diff / mean_t1).item()
+        numerator, denominator = stats.unbind()
+        safe = torch.isfinite(stats).all() & denominator.gt(0.0)
+        # A zero denominator or a non-finite activation must conservatively
+        # disable reuse for this step rather than make ranks diverge. ``item``
+        # remains necessary for cache-dit's Python control flow, but happens
+        # only once after the single packed collective.
+        diff = torch.where(
+            safe,
+            numerator / denominator,
+            torch.full_like(numerator, float("inf")),
+        ).item()
         self.add_residual_diff(diff)
         return diff < threshold
 
@@ -156,6 +196,8 @@ def get_scm_mask(
     num_inference_steps: int,
     compute_bins: Optional[List[int]] = None,
     cache_bins: Optional[List[int]] = None,
+    *,
+    log_result: bool = True,
 ) -> Optional[List[int]]:
     """
     Get SCM mask using cache-dit's steps_mask().
@@ -184,12 +226,13 @@ def get_scm_mask(
 
     compute_count = sum(mask)
     cache_count = len(mask) - compute_count
-    logger.info(
-        "SCM: generated mask with %d compute steps, %d cache steps (preset=%s)",
-        compute_count,
-        cache_count,
-        preset,
-    )
+    if log_result:
+        logger.info(
+            "SCM: generated mask with %d compute steps, %d cache steps (preset=%s)",
+            compute_count,
+            cache_count,
+            preset,
+        )
 
     return mask
 
@@ -280,6 +323,8 @@ class CacheDitConfig:
         steps_computation_mask: Binary mask for step-level caching (1=compute, 0=cache).
             Generated by get_scm_mask() (wrapper around cache_dit.steps_mask()).
         steps_computation_policy: Caching policy for SCM ("dynamic" or "static").
+        scm_key: Effective SCM source settings. Used internally to determine
+            whether cache hooks must be rebuilt between requests.
     """
 
     enabled: bool = False
@@ -305,6 +350,7 @@ class CacheDitConfig:
     # SCM fields (generated by _maybe_enable_cache_dit from env configuration)
     steps_computation_mask: Optional[List[int]] = None
     steps_computation_policy: str = "dynamic"
+    scm_key: tuple[str, tuple[int, ...] | None, tuple[int, ...] | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -364,11 +410,225 @@ _CUSTOM_BLOCK_ADAPTER_SPECS: dict[str, CustomBlockAdapterSpec] = {
         blocks_attr="blocks",
         forward_pattern=ForwardPattern.Pattern_3,
     ),
-    "HunyuanImage3CacheDitAdapter": CustomBlockAdapterSpec(
-        blocks_attr="blocks",
-        forward_pattern=ForwardPattern.Pattern_1,
-    ),
 }
+
+
+class CacheDitController:
+    """Request-scoped Cache-DiT lifecycle for native denoising loops.
+
+    ``DenoisingStage`` owns the same lifecycle for standard diffusion models.
+    Model-specific loops can use this controller to make the public request
+    switch, overrides, SCM, and mount transitions consistent without inheriting
+    the standard denoising implementation.
+    """
+
+    def __init__(self, transformer: torch.nn.Module, server_args: Any) -> None:
+        self.transformer = transformer
+        self.server_args = server_args
+        self.enabled = False
+        self.active_key: tuple | None = None
+        self.request_overrides: dict[str, Any] = {}
+
+    @staticmethod
+    def is_requested(sampling_params: Any) -> bool:
+        """Resolve the request switch, using the environment as its default."""
+        enabled = getattr(sampling_params, "enable_cache_dit", None)
+        return envs.SGLANG_CACHE_DIT_ENABLED if enabled is None else enabled
+
+    @staticmethod
+    def _parse_scm_bins(
+        overrides: dict[str, Any],
+    ) -> tuple[list[int] | None, list[int] | None, str]:
+        scm_preset = overrides.get("scm_preset", envs.SGLANG_CACHE_DIT_SCM_PRESET)
+        compute_bins = overrides.get("scm_compute_bins")
+        cache_bins = overrides.get("scm_cache_bins")
+        if compute_bins is not None or cache_bins is not None:
+            if compute_bins is None or cache_bins is None:
+                raise ValueError(
+                    "cache_dit_params SCM custom bins require both "
+                    "scm_compute_bins and scm_cache_bins."
+                )
+            return [int(x) for x in compute_bins], [int(x) for x in cache_bins], scm_preset
+
+        compute_bins_str = envs.SGLANG_CACHE_DIT_SCM_COMPUTE_BINS
+        cache_bins_str = envs.SGLANG_CACHE_DIT_SCM_CACHE_BINS
+        if compute_bins_str and cache_bins_str:
+            try:
+                return (
+                    [int(x.strip()) for x in compute_bins_str.split(",")],
+                    [int(x.strip()) for x in cache_bins_str.split(",")],
+                    scm_preset,
+                )
+            except ValueError as exc:
+                logger.warning("Failed to parse Cache-DiT SCM bins: %s", exc)
+                return None, None, "none"
+        if compute_bins_str or cache_bins_str:
+            logger.warning(
+                "Cache-DiT SCM custom bins require both compute and cache bins; "
+                "falling back to preset %r.",
+                scm_preset,
+            )
+        return None, None, scm_preset
+
+    @classmethod
+    def _build_config_from_overrides(
+        cls,
+        overrides: dict[str, Any],
+        num_inference_steps: int,
+        *,
+        log_scm_mask: bool = True,
+    ) -> CacheDitConfig:
+        compute_bins, cache_bins, scm_preset = cls._parse_scm_bins(overrides)
+        scm_key = (
+            scm_preset,
+            tuple(compute_bins) if compute_bins is not None else None,
+            tuple(cache_bins) if cache_bins is not None else None,
+        )
+        return CacheDitConfig(
+            enabled=True,
+            Fn_compute_blocks=overrides.get("Fn_compute_blocks", envs.SGLANG_CACHE_DIT_FN),
+            Bn_compute_blocks=overrides.get("Bn_compute_blocks", envs.SGLANG_CACHE_DIT_BN),
+            max_warmup_steps=overrides.get("max_warmup_steps", envs.SGLANG_CACHE_DIT_WARMUP),
+            residual_diff_threshold=overrides.get(
+                "residual_diff_threshold", envs.SGLANG_CACHE_DIT_RDT
+            ),
+            max_continuous_cached_steps=overrides.get(
+                "max_continuous_cached_steps", envs.SGLANG_CACHE_DIT_MC
+            ),
+            enable_taylorseer=overrides.get(
+                "enable_taylorseer", envs.SGLANG_CACHE_DIT_TAYLORSEER
+            ),
+            taylorseer_order=overrides.get(
+                "taylorseer_order", envs.SGLANG_CACHE_DIT_TS_ORDER
+            ),
+            num_inference_steps=num_inference_steps,
+            steps_computation_mask=get_scm_mask(
+                preset=scm_preset,
+                num_inference_steps=num_inference_steps,
+                compute_bins=compute_bins,
+                cache_bins=cache_bins,
+                log_result=log_scm_mask,
+            ),
+            steps_computation_policy=overrides.get(
+                "scm_policy", envs.SGLANG_CACHE_DIT_SCM_POLICY
+            ),
+            scm_key=scm_key,
+        )
+
+    def _build_config(self, num_inference_steps: int) -> CacheDitConfig:
+        return self._build_config_from_overrides(
+            self.request_overrides, num_inference_steps
+        )
+
+    def unmount(self) -> None:
+        """Remove hooks and forget the configuration that mounted them."""
+        if self.enabled:
+            disable_cache_on_transformer(self.transformer)
+        self.enabled = False
+        self.active_key = None
+
+    @staticmethod
+    def _mount_key(config: CacheDitConfig, has_separate_cfg: bool) -> tuple:
+        """Fields that require hooks to be rebuilt instead of merely refreshed."""
+        return (
+            config.Fn_compute_blocks,
+            config.Bn_compute_blocks,
+            config.max_warmup_steps,
+            config.residual_diff_threshold,
+            config.max_continuous_cached_steps,
+            config.enable_taylorseer,
+            config.taylorseer_order,
+            config.steps_computation_policy,
+            config.scm_key,
+            bool(has_separate_cfg),
+        )
+
+    @classmethod
+    def effective_config_key(
+        cls,
+        sampling_params: Any,
+        num_inference_steps: int,
+        *,
+        has_separate_cfg: bool,
+    ) -> tuple:
+        """Hashable Cache-DiT behavior identity for dynamic-batch grouping.
+
+        Request overrides are deliberately resolved against the environment
+        before comparison. This allows an omitted knob and an override equal
+        to its environment default to share one native denoising batch.
+        """
+        overrides = resolve_cache_dit_request_overrides(
+            getattr(sampling_params, "cache_dit_params", None)
+        )
+        config = cls._build_config_from_overrides(
+            overrides, int(num_inference_steps), log_scm_mask=False
+        )
+        return (
+            *cls._mount_key(config, has_separate_cfg),
+            config.num_inference_steps,
+            tuple(config.steps_computation_mask)
+            if config.steps_computation_mask is not None
+            else None,
+        )
+
+    def configure(
+        self,
+        num_inference_steps: int,
+        batch: Any,
+        *,
+        tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        has_separate_cfg: bool = False,
+    ) -> None:
+        """Mount or refresh Cache-DiT at a native loop's request boundary."""
+        sampling_params = batch.sampling_params
+        requested = self.is_requested(sampling_params)
+        if getattr(self.server_args, "enable_breakable_cuda_graph", False):
+            if requested:
+                logger.warning_once(
+                    "Cache-DiT was requested but is disabled because breakable "
+                    "CUDA graphs are enabled."
+                )
+            self.unmount()
+            return
+
+        # Warmups must not initialise or advance a production request cache.
+        if getattr(batch, "is_warmup", False):
+            self.unmount()
+            return
+
+        self.request_overrides = resolve_cache_dit_request_overrides(
+            getattr(sampling_params, "cache_dit_params", None)
+        )
+        if not requested:
+            self.unmount()
+            return
+
+        config = self._build_config(int(num_inference_steps))
+        desired_key = self._mount_key(config, has_separate_cfg)
+        if self.enabled and desired_key != self.active_key:
+            self.unmount()
+        validator = getattr(self.transformer, "validate_cache_dit_config", None)
+        if validator is not None:
+            validator(config)
+
+        if self.enabled:
+            refresh_context_on_transformer(
+                self.transformer,
+                int(num_inference_steps),
+                steps_computation_mask=config.steps_computation_mask,
+                steps_computation_policy=config.steps_computation_policy,
+            )
+            return
+
+        enable_cache_on_transformer(
+            self.transformer,
+            config,
+            model_name=type(self.transformer).__name__,
+            tp_group=tp_group,
+            has_separate_cfg=has_separate_cfg,
+        )
+        self.enabled = True
+        self.active_key = desired_key
 
 
 def _build_custom_block_adapter(
@@ -425,23 +685,22 @@ def enable_cache_on_transformer(
             "Please provide it in CacheDitConfig."
         )
 
-    # Prefer the standard path (transformer pre-registered in cache-dit). For
-    # models absent from the registry, fall back to a manual BlockAdapter (see
-    # _build_custom_block_adapter).
-    custom_adapter = None
-    if not BlockAdapterRegister.is_supported(transformer):
-        custom_adapter = _build_custom_block_adapter(
-            transformer, has_separate_cfg=has_separate_cfg
+    # Prefer SGLang's exact class registry over cache-dit's prefix registry.
+    # This prevents a native model whose name starts with a supported family
+    # from being interpreted as a diffusers transformer with a different block
+    # layout.
+    custom_adapter = _build_custom_block_adapter(
+        transformer, has_separate_cfg=has_separate_cfg
+    )
+    if custom_adapter is None and not BlockAdapterRegister.is_supported(transformer):
+        transformer_cls_name = transformer.__class__.__name__
+        raise ValueError(
+            f"{transformer_cls_name} is not officially supported by cache-dit. "
+            "Supported cache-dit DiT families include Flux, QwenImage, HunyuanDiT, "
+            "HunyuanVideo, Wan, CogVideoX, Mochi, and others. "
+            "Please ensure your transformer belongs to one of these families or "
+            "define a custom BlockAdapter."
         )
-        if custom_adapter is None:
-            transformer_cls_name = transformer.__class__.__name__
-            raise ValueError(
-                f"{transformer_cls_name} is not officially supported by cache-dit. "
-                "Supported cache-dit DiT families include Flux, QwenImage, HunyuanDiT, "
-                "HunyuanVideo, Wan, CogVideoX, Mochi, and others. "
-                "Please ensure your transformer belongs to one of these families or "
-                "define a custom BlockAdapter."
-            )
 
     # Build cache config (including SCM fields if provided)
     cache_config = DBCacheConfig(
@@ -717,19 +976,26 @@ def refresh_context_on_transformer(
     num_inference_steps: int,
     scm_preset: str | None = None,
     verbose: bool = False,
+    *,
+    steps_computation_mask: Optional[List[int]] = None,
+    steps_computation_policy: str | None = None,
 ) -> None:
     """Refresh cache-dit context for transformer."""
-    steps_computation_mask = None
-    if scm_preset is not None:
+    if steps_computation_mask is None and scm_preset is not None:
         steps_computation_mask = cache_dit.steps_mask(
             mask_policy=scm_preset, total_steps=num_inference_steps
         )
+    policy = (
+        steps_computation_policy
+        if steps_computation_policy is not None
+        else scm_preset
+    )
     cache_dit.refresh_context(
         transformer,
         cache_config=DBCacheConfig().reset(
             num_inference_steps=num_inference_steps,
             steps_computation_mask=steps_computation_mask,
-            steps_computation_policy=scm_preset,
+            steps_computation_policy=policy,
         ),
         verbose=verbose,
     )
